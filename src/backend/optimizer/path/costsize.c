@@ -87,6 +87,7 @@
 
 #include "access/amapi.h"
 #include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/tsmapi.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
@@ -2077,6 +2078,8 @@ cost_incremental_sort(Path *path,
 
 	Assert(presorted_keys > 0 && presorted_keys < list_length(pathkeys));
 
+	comparison_cost += sort_comparison_cost(root, pathkeys);
+
 	/*
 	 * We want to be sure the cost of a sort is never estimated as zero, even
 	 * if passed-in tuple count is zero.  Besides, mustn't do log(0)...
@@ -2196,6 +2199,93 @@ cost_incremental_sort(Path *path,
 }
 
 /*
+ * sort_comparison_cost
+ *	  Extra per-comparison cost of sorting on the given pathkeys.
+ *
+ * cost_tuplesort() charges a flat 2.0 * cpu_operator_cost per comparison for
+ * every type.  That is correct for a type whose comparator is a single inline
+ * test, and wrong for everything else: measured on one machine, sorting 1M
+ * rows in memory from a single table, the cost of a comparison relative to
+ * int4 ranges from 0.99x for date to 2.68x for name, and the two types that
+ * share a 16-byte representation sit at 1.17x (interval) and 2.15x (uuid).
+ * Neither the type's length nor the width of its values predicts that; it is a
+ * property of the comparison routine.
+ *
+ * A sort comparator is an ordinary function, and PostgreSQL already carries a
+ * per-function cost estimate for exactly this purpose: pg_proc.procost, which
+ * today is 1.0 for every comparator in the system (btint4cmp, uuid_cmp,
+ * interval_cmp, network_cmp, btnamecmp and the rest all read 1).  Rather than
+ * hardcoding a table of type OIDs here, derive the charge from the comparator
+ * the sort will actually call, so the relative costs can be expressed as data
+ * and adjusted without touching the planner.
+ *
+ * The comparator is scaled so that a procost of 1.0 reproduces today's flat
+ * charge exactly; a type measured at 2.15x its reference needs procost 2.15.
+ * Returns 0.0 when the ordering operator cannot be identified.
+ */
+Cost
+sort_comparison_cost(PlannerInfo *root, List *pathkeys)
+{
+	Cost		extra = 0.0;
+	QualCost	cost;
+	ListCell   *lc;
+
+	foreach(lc, pathkeys)
+	{
+		PathKey    *pathkey = lfirst_node(PathKey, lc);
+		EquivalenceMember *em;
+		Node	   *expr;
+		Oid			typid;
+		Oid			cmpfunc = InvalidOid;
+		ListCell   *lc2;
+
+		/*
+		 * Volatile expressions are charged through the general expression
+		 * evaluation costs, not here.
+		 */
+		if (pathkey->pk_eclass->ec_has_volatile)
+			continue;
+
+		em = (EquivalenceMember *) linitial(pathkey->pk_eclass->ec_members);
+		expr = (Node *) em->em_expr;
+		typid = exprType(expr);
+
+		/*
+		 * BTORDER_PROC is the btree support function that compares two values,
+		 * which is exactly the work a sort does per comparison.
+		 */
+		foreach(lc2, pathkey->pk_eclass->ec_opfamilies)
+		{
+			Oid			opfamily = lfirst_oid(lc2);
+
+			cmpfunc = get_opfamily_proc(opfamily, typid, typid, BTORDER_PROC);
+			if (OidIsValid(cmpfunc))
+				break;
+		}
+
+		/* Not every type has a comparator in an opfamily of its own. */
+		if (!OidIsValid(cmpfunc))
+			continue;
+
+		/*
+		 * add_function_cost() reads pg_proc.procost and gives a prosupport
+		 * function the chance to do better, so a type can express its own
+		 * comparison cost without this file knowing anything about it.
+		 *
+		 * procost is in cpu_operator_cost units and the flat charge is two of
+		 * them, so scaling by two keeps a procost of 1.0 a no-op: a system
+		 * whose comparators are all at the default is unaffected.
+		 */
+		cost.startup = 0.0;
+		cost.per_tuple = 0.0;
+		add_function_cost(root, cmpfunc, NULL, &cost);
+		extra += 2.0 * (cost.per_tuple - cpu_operator_cost);
+	}
+
+	return extra;
+}
+
+/*
  * cost_sort
  *	  Determines and returns the cost of sorting a relation, including
  *	  the cost of reading the input data.
@@ -2217,6 +2307,8 @@ cost_sort(Path *path, PlannerInfo *root,
 {
 	Cost		startup_cost;
 	Cost		run_cost;
+
+	comparison_cost += sort_comparison_cost(root, pathkeys);
 
 	cost_tuplesort(&startup_cost, &run_cost,
 				   tuples, width,
