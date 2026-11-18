@@ -2276,9 +2276,17 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 		 * them, so scaling by two keeps a procost of 1.0 a no-op: a system
 		 * whose comparators are all at the default is unaffected.
 		 */
+		/*
+		 * Pass the sort key expression, not NULL: a prosupport cost function
+		 * cannot estimate the cost of comparing text without seeing the
+		 * collation and typmod.  Measured on one machine, the same text
+		 * comparison ranges from 1.02x (COLLATE "C", 10 bytes, unique values)
+		 * to 9.29x (ICU, 100 bytes, 10k distinct) relative to int4, so procost
+		 * alone cannot express it.
+		 */
 		cost.startup = 0.0;
 		cost.per_tuple = 0.0;
-		add_function_cost(root, cmpfunc, NULL, &cost);
+		add_function_cost(root, cmpfunc, expr, &cost);
 		extra += 2.0 * (cost.per_tuple - cpu_operator_cost);
 	}
 
