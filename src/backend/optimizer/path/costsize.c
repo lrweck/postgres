@@ -2203,20 +2203,35 @@ cost_incremental_sort(Path *path,
  * sort_provider_cost_factor
  *		Relative cost of comparing two values of the given collation.
  *
- * A sort builds abbreviated keys, and only falls back to the full
+ * A sort builds abbreviated keys and only falls back to the full
  * collation-aware comparison when two abbreviations tie.  Whether abbreviation
- * is available at all depends on the collation provider, and that dominates
- * the cost.  Measured on one machine, sorting 1M rows in memory, comparing the
- * same text against int4 costs:
+ * is available at all is a property of the collation provider, and it dominates
+ * the cost of comparing strings: sorting 1M unique values in memory on one
+ * machine, the total sort time against int4 is
  *
- *	   COLLATE "C" (libc)			1.01x
- *	   ucs_basic / pg_c_utf8 (builtin)	1.03x
- *	   en-US-x-icu (ICU)			1.48x
+ *	   COLLATE "C" (libc)			1.01x - 1.11x
+ *	   ucs_basic / pg_c_utf8 (builtin)	1.03x - 1.13x
+ *	   en-US-x-icu (ICU)			1.46x - 1.62x
  *
- * and the ICU-to-C ratio holds at 1.5x to 1.8x across key widths of 11, 41 and
- * 101 bytes.  A libc collation other than C or POSIX compares with strcoll()
- * and gets no abbreviation either, so it is charged like ICU; it could not be
- * measured here because the test environment has no non-C locales installed.
+ * for 11-byte keys, and the ICU-to-C ratio stays between 1.46x and 1.76x as
+ * keys grow to 41 and 101 bytes.  Key width is deliberately not modelled: an
+ * out-of-sample test showed the cost is driven by the length of the common
+ * prefix, not by key size, and is not even monotonic in width (41-byte keys
+ * cost more than 101-byte ones under COLLATE "C").
+ *
+ * The factor returned here multiplies cost_tuplesort()'s 2.0 * cpu_operator_cost
+ * per comparison, which is only about 35% of the cost of a large sort, so a
+ * factor chosen to reproduce the measured total time is larger than the
+ * measured time ratio.  At 1M rows the comparison charge is 0.345 of the sort
+ * cost, and 1.46x of total time therefore needs 1 + (1.46 - 1) / 0.345 = 2.33
+ * on the comparison itself; 41-byte keys need 2.50.  2.4 is used for both, which
+ * reproduces the measured time at 11 and 41 bytes and deliberately undercharges
+ * the 101-byte case (which would need 3.2), since overcharging flips plans in
+ * the wrong direction.
+ *
+ * A libc collation other than C or POSIX compares with strcoll() and gets no
+ * abbreviation either, so it is charged like ICU; it could not be measured here
+ * because the test environment has no non-C locales installed.
  *
  * Returns 1.0 whenever there is no evidence to charge more.
  */
@@ -2230,7 +2245,7 @@ sort_provider_cost_factor(Oid collid)
 	if (get_collation_provider(collid) == COLLPROVIDER_BUILTIN)
 		return 1.05;
 
-	return get_collation_is_c(collid) ? 1.0 : 1.6;
+	return get_collation_is_c(collid) ? 1.0 : 2.4;
 }
 
 /*
