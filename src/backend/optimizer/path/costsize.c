@@ -2201,24 +2201,24 @@ cost_incremental_sort(Path *path,
 
 /*
  * sort_provider_cost_factor
- *	  Relative cost of comparing values under the given collation.
+ *		Relative cost of comparing two values of the given collation.
  *
- * A sort builds abbreviated keys and only falls back to the full
+ * A sort builds abbreviated keys, and only falls back to the full
  * collation-aware comparison when two abbreviations tie.  Whether abbreviation
- * is available at all is a property of the collation provider, and it dominates
- * the cost.  Measured on one machine, sorting 1M rows in memory, the same text
- * comparison against int4 costs:
+ * is available at all depends on the collation provider, and that dominates
+ * the cost.  Measured on one machine, sorting 1M rows in memory, comparing the
+ * same text against int4 costs:
  *
- *	   COLLATE "C" (libc)				1.01x
- *	   ucs_basic / pg_c_utf8 (builtin)		1.03x
- *	   en-US-x-icu (ICU)				1.48x
+ *	   COLLATE "C" (libc)			1.01x
+ *	   ucs_basic / pg_c_utf8 (builtin)	1.03x
+ *	   en-US-x-icu (ICU)			1.48x
  *
- * and the ICU to C ratio holds at 1.5x to 1.8x across key widths of 11, 41 and
- * 101 bytes.  A libc collation other than C/POSIX compares with strcoll() and
- * does not abbreviate either, so it is charged like ICU; it could not be
+ * and the ICU-to-C ratio holds at 1.5x to 1.8x across key widths of 11, 41 and
+ * 101 bytes.  A libc collation other than C or POSIX compares with strcoll()
+ * and gets no abbreviation either, so it is charged like ICU; it could not be
  * measured here because the test environment has no non-C locales installed.
  *
- * Returns 1.0 for anything we have no evidence about.
+ * Returns 1.0 whenever there is no evidence to charge more.
  */
 static double
 sort_provider_cost_factor(Oid collid)
@@ -2226,24 +2226,11 @@ sort_provider_cost_factor(Oid collid)
 	if (!OidIsValid(collid))
 		return 1.0;
 
-	switch (get_collation_provider(collid))
-	{
-		case COLLPROVIDER_ICU:
-			return 1.6;
-		case COLLPROVIDER_BUILTIN:
-			return 1.05;
-		case COLLPROVIDER_LIBC:
+	/* Builtin collations compare code points directly, without strcoll(). */
+	if (get_collation_provider(collid) == COLLPROVIDER_BUILTIN)
+		return 1.05;
 
-			/*
-			 * C and POSIX compare with memcmp and keep abbreviation; any other
-			 * libc locale does not.
-			 */
-			if (collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID)
-				return 1.0;
-			return 1.6;
-		default:
-			return 1.0;
-	}
+	return get_collation_is_c(collid) ? 1.0 : 1.6;
 }
 
 /*

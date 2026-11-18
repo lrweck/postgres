@@ -25,6 +25,7 @@
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_collation.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_index.h"
@@ -48,6 +49,7 @@
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/pg_locale.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -4047,6 +4049,57 @@ get_subscription_name(Oid subid, bool missing_ok)
 	ReleaseSysCache(tup);
 
 	return subname;
+}
+
+/*
+ * get_collation_is_c
+ *		Return true if the collation compares like the C locale, i.e. if the
+ *		LC_COLLATE it uses is "C" or "POSIX".
+ *
+ * This differs from comparing the collation OID against C_COLLATION_OID: it
+ * also recognizes aliases of C, and it resolves the "default" collation to the
+ * database's own locale.
+ */
+bool
+get_collation_is_c(Oid colloid)
+{
+	HeapTuple	tp;
+	Form_pg_collation collform;
+	Datum		datum;
+	bool		isnull;
+	bool		result = false;
+
+	if (!OidIsValid(colloid))
+		return false;
+
+	tp = SearchSysCache1(COLLOID, ObjectIdGetDatum(colloid));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for collation %u", colloid);
+	collform = (Form_pg_collation) GETSTRUCT(tp);
+
+	if (collform->collprovider == COLLPROVIDER_DEFAULT)
+	{
+		ReleaseSysCache(tp);
+		return pg_database_locale()->collate_is_c;
+	}
+
+	/* Only libc collations can be C; builtin ones never use strcoll(). */
+	if (collform->collprovider == COLLPROVIDER_LIBC)
+	{
+		datum = SysCacheGetAttr(COLLOID, tp, Anum_pg_collation_collcollate,
+								&isnull);
+		if (!isnull)
+		{
+			char	   *collcollate = TextDatumGetCString(datum);
+
+			result = (strcmp(collcollate, "C") == 0 ||
+					  strcmp(collcollate, "POSIX") == 0);
+			pfree(collcollate);
+		}
+	}
+
+	ReleaseSysCache(tp);
+	return result;
 }
 
 /*
