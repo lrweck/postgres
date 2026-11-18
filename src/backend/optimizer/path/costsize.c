@@ -500,8 +500,13 @@ cost_gather_merge(GatherMergePath *path, PlannerInfo *root,
 	N = (double) path->num_workers + 1;
 	logN = LOG2(N);
 
-	/* Assumed cost per tuple comparison */
-	comparison_cost = 2.0 * cpu_operator_cost;
+	/*
+	 * Assumed cost per tuple comparison.  As in cost_merge_append(), the
+	 * heap merge compares with the same btree ordering comparators a sort
+	 * uses.
+	 */
+	comparison_cost = 2.0 * cpu_operator_cost +
+		sort_comparison_cost(root, path->path.pathkeys);
 
 	/* Heap creation cost */
 	startup_cost += comparison_cost * N * logN;
@@ -2710,8 +2715,13 @@ cost_merge_append(Path *path, PlannerInfo *root,
 	N = (n_streams < 2) ? 2.0 : (double) n_streams;
 	logN = LOG2(N);
 
-	/* Assumed cost per tuple comparison */
-	comparison_cost = 2.0 * cpu_operator_cost;
+	/*
+	 * Assumed cost per tuple comparison.  The heap merge compares with the
+	 * same btree ordering comparators a sort uses, so it pays the same extra
+	 * per-comparison cost.
+	 */
+	comparison_cost = 2.0 * cpu_operator_cost +
+		sort_comparison_cost(root, pathkeys);
 
 	/* Heap creation cost */
 	startup_cost += comparison_cost * N * logN;
