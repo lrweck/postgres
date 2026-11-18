@@ -89,6 +89,7 @@
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/tsmapi.h"
+#include "catalog/pg_collation_d.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
@@ -2199,6 +2200,53 @@ cost_incremental_sort(Path *path,
 }
 
 /*
+ * sort_provider_cost_factor
+ *	  Relative cost of comparing values under the given collation.
+ *
+ * A sort builds abbreviated keys and only falls back to the full
+ * collation-aware comparison when two abbreviations tie.  Whether abbreviation
+ * is available at all is a property of the collation provider, and it dominates
+ * the cost.  Measured on one machine, sorting 1M rows in memory, the same text
+ * comparison against int4 costs:
+ *
+ *	   COLLATE "C" (libc)				1.01x
+ *	   ucs_basic / pg_c_utf8 (builtin)		1.03x
+ *	   en-US-x-icu (ICU)				1.48x
+ *
+ * and the ICU to C ratio holds at 1.5x to 1.8x across key widths of 11, 41 and
+ * 101 bytes.  A libc collation other than C/POSIX compares with strcoll() and
+ * does not abbreviate either, so it is charged like ICU; it could not be
+ * measured here because the test environment has no non-C locales installed.
+ *
+ * Returns 1.0 for anything we have no evidence about.
+ */
+static double
+sort_provider_cost_factor(Oid collid)
+{
+	if (!OidIsValid(collid))
+		return 1.0;
+
+	switch (get_collation_provider(collid))
+	{
+		case COLLPROVIDER_ICU:
+			return 1.6;
+		case COLLPROVIDER_BUILTIN:
+			return 1.05;
+		case COLLPROVIDER_LIBC:
+
+			/*
+			 * C and POSIX compare with memcmp and keep abbreviation; any other
+			 * libc locale does not.
+			 */
+			if (collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID)
+				return 1.0;
+			return 1.6;
+		default:
+			return 1.0;
+	}
+}
+
+/*
  * sort_comparison_cost
  *	  Extra per-comparison cost of sorting on the given pathkeys.
  *
@@ -2287,7 +2335,11 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 		cost.startup = 0.0;
 		cost.per_tuple = 0.0;
 		add_function_cost(root, cmpfunc, expr, &cost);
-		extra += 2.0 * (cost.per_tuple - cpu_operator_cost);
+
+		/* Scale by what the collation provider costs to compare. */
+		extra += 2.0 * (cost.per_tuple *
+						sort_provider_cost_factor(exprCollation(expr)) -
+						cpu_operator_cost);
 	}
 
 	return extra;
