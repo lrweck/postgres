@@ -2205,29 +2205,29 @@ cost_incremental_sort(Path *path,
  *
  * A sort builds abbreviated keys and only falls back to the full
  * collation-aware comparison when two abbreviations tie.  Whether abbreviation
- * is available at all is a property of the collation provider, and it dominates
- * the cost of comparing strings: sorting 1M unique values in memory on one
- * machine, the total sort time against int4 is
+ * is available at all is a property of the collation provider, and that is the
+ * first-order effect: sorting 1M distinct values in memory on one machine, the
+ * total sort time against COLLATE "C" on the same data is
  *
- *	   COLLATE "C" (libc)			1.01x - 1.11x
- *	   ucs_basic / pg_c_utf8 (builtin)	1.03x - 1.13x
- *	   en-US-x-icu (ICU)			1.46x - 1.62x
+ *	   builtin (ucs_basic, pg_c_utf8)	1.02x - 1.06x
+ *	   ICU				1.24x - 3.19x
  *
- * for 11-byte keys, and the ICU-to-C ratio stays between 1.46x and 1.76x as
- * keys grow to 41 and 101 bytes.  Key width is deliberately not modelled: an
- * out-of-sample test showed the cost is driven by the length of the common
- * prefix, not by key size, and is not even monotonic in width (41-byte keys
- * cost more than 101-byte ones under COLLATE "C").
+ * The spread inside ICU is not the locale.  With en-US-x-icu held fixed, 16-byte
+ * unique keys cost 1.43x when they are ASCII letters and 3.19x when they carry
+ * diacritics, because accented letters share a primary weight and the
+ * comparison has to descend into the secondary and tertiary levels.  Measured
+ * across locales: Cyrillic 1.24x, CJK 1.36x, Turkish 1.75x, accented Latin
+ * 3.04x - 3.19x.  The driver is how densely the data collides at the primary
+ * level, which no statistic in pg_statistic records, so it is not modelled here
+ * and the spread shows up as residual error.
  *
- * The factor returned here multiplies cost_tuplesort()'s 2.0 * cpu_operator_cost
- * per comparison, which is only about 35% of the cost of a large sort, so a
- * factor chosen to reproduce the measured total time is larger than the
- * measured time ratio.  At 1M rows the comparison charge is 0.345 of the sort
- * cost, and 1.46x of total time therefore needs 1 + (1.46 - 1) / 0.345 = 2.33
- * on the comparison itself; 41-byte keys need 2.50.  2.4 is used for both, which
- * reproduces the measured time at 11 and 41 bytes and deliberately undercharges
- * the 101-byte case (which would need 3.2), since overcharging flips plans in
- * the wrong direction.
+ * The factor returned multiplies cost_tuplesort()'s 2.0 * cpu_operator_cost per
+ * comparison.  Expressed on that component, reproducing the measured total time
+ * of a 1M-row sort needs 1.37x to 4.41x depending on the data above; 2.4 is
+ * close to their geometric mean (2.29), so no case is off by more than about
+ * 75% and the common case is centered.  Undercharging keeps today's plans;
+ * overcharging flips them for no reason, which is why this is centred rather
+ * than set to the worst case.
  *
  * A libc collation other than C or POSIX compares with strcoll() and gets no
  * abbreviation either, so it is charged like ICU; it could not be measured here
