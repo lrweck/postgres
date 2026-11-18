@@ -109,6 +109,7 @@ extern void cost_namedtuplestorescan(Path *path, PlannerInfo *root,
 extern void cost_resultscan(Path *path, PlannerInfo *root,
 							RelOptInfo *baserel, ParamPathInfo *param_info);
 extern void cost_recursive_union(Path *runion, Path *nrterm, Path *rterm);
+extern Cost sort_comparison_cost(List *pathkeys);
 extern void cost_sort(Path *path, PlannerInfo *root,
 					  List *pathkeys, int input_disabled_nodes,
 					  Cost input_cost, double tuples, int width,

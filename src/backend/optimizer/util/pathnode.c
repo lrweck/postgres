@@ -2932,7 +2932,7 @@ create_sort_path(PlannerInfo *root,
 			  subpath->total_cost,
 			  subpath->rows,
 			  subpath->pathtarget->width,
-			  0.0,				/* XXX comparison_cost shouldn't be 0? */
+			  sort_comparison_cost(pathkeys),
 			  work_mem, limit_tuples);
 
 	return pathnode;
