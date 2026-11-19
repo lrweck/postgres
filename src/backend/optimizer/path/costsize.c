@@ -2217,32 +2217,27 @@ cost_incremental_sort(Path *path,
  * sort_provider_cost_factor
  *		Relative cost of comparing two values of the given collation.
  *
- * Sorting text builds abbreviated keys when the collation allows it, and falls
- * back to the full collation-aware comparison when two abbreviations tie or when
- * there are none.  Whether abbreviation is available at all is a property of the
- * collation provider, and that is the first-order effect: sorting 1M distinct
- * values in memory on one machine, the total sort time against COLLATE "C" on
- * the same data is
+ * A sort of text uses abbreviated keys when the collation allows it, and falls
+ * back to the full collation-aware comparison when two abbreviations tie or
+ * when there are none.  Whether abbreviation is available at all is a property
+ * of the collation provider, and that is the first-order effect: measured on one
+ * machine, sorting 1M rows in memory with the same data, ICU costs 1.5x to 1.9x
+ * the C collation and the builtin provider costs about the same as C.
  *
- *	   builtin (ucs_basic, pg_c_utf8)	1.02x - 1.06x
- *	   ICU				1.24x - 3.19x
- *
- * The spread inside ICU is not the locale.  With en-US-x-icu held fixed, 16-byte
- * unique keys cost 1.43x when they are ASCII letters and 3.19x when they carry
- * diacritics, because accented letters share a primary weight and the
- * comparison has to descend into the secondary and tertiary levels.  Measured
- * across locales: Cyrillic 1.24x, CJK 1.36x, Turkish 1.75x, accented Latin
- * 3.04x - 3.19x.  The driver is how densely the data collides at the primary
- * level, which no statistic in pg_statistic records, so it is not modelled here
- * and the spread shows up as residual error.
+ * The spread inside ICU is not the locale.  With the locale held fixed, data
+ * that collides at the primary level (accented Latin, for instance) costs more
+ * than data that does not, because the comparison has to descend into the
+ * secondary and tertiary weights.  How densely the data collides is not
+ * recorded in pg_statistic, so it is not modelled here and shows up as residual
+ * error.
  *
  * The factor returned multiplies cost_tuplesort()'s 2.0 * cpu_operator_cost per
  * comparison.  Expressed on that component, reproducing the measured total time
- * of a 1M-row sort needs 1.37x to 4.41x depending on the data above; 2.4 is
- * close to their geometric mean (2.29), so no case is off by more than about
- * 1.9x and the common case is centered.  Undercharging keeps today's plans;
- * overcharging flips them for no reason, which is why this is centred rather
- * than set to the worst case.
+ * of a 1M-row sort needs roughly 1.4x to 4.4x depending on the provider and the
+ * data; 2.4 is close to their geometric mean, so no case is off by more than
+ * about 1.9x and the common case is centred.  Undercharging keeps today's
+ * plans; overcharging flips them for no reason, which is why this is centred
+ * rather than set to the worst case.
  *
  * A libc collation other than C or POSIX compares with strcoll() and gets no
  * abbreviation either, so it is charged like ICU; it could not be measured here
@@ -2269,12 +2264,12 @@ sort_provider_cost_factor(Oid collid)
  *
  * cost_tuplesort() charges a flat 2.0 * cpu_operator_cost per comparison for
  * every type.  That is correct for a type whose comparator is a single inline
- * test, and wrong for everything else: measured on one machine, sorting 1M
- * rows in memory from a single table, the cost of a comparison relative to
- * int4 ranges from 0.99x for date to 2.68x for name, and the two types that
- * share a 16-byte representation sit at 1.17x (interval) and 2.15x (uuid).
- * Neither the type's length nor the width of its values predicts that; it is a
- * property of the comparison routine.
+ * test, and wrong for everything else: measured on one machine, sorting 1M rows
+ * of a wide table in memory (src/tools/measure_sort_cost.sql), the total time
+ * relative to int4 runs from about 1.0x for the fixed-length types to 2.4x for
+ * uuid, and the two types that share a 16-byte representation sit at 1.2x
+ * (interval) and 2.4x (uuid).  Neither the type's length nor the width of its
+ * values predicts that; it is a property of the comparison routine.
  *
  * A sort comparator is an ordinary function, and PostgreSQL already carries a
  * per-function cost estimate for exactly this purpose: pg_proc.procost, which
@@ -2342,10 +2337,9 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 		/*
 		 * Pass the sort key expression, not NULL: a prosupport cost function
 		 * cannot estimate the cost of comparing text without seeing the
-		 * collation and typmod.  Measured on one machine, the same text
-		 * comparison ranges from 1.02x (COLLATE "C", 10 bytes, unique values)
-		 * to 9.29x (ICU, 100 bytes, 10k distinct) relative to int4, so procost
-		 * alone cannot express it.
+		 * collation and typmod.  The same comparison costs 1.5x to 1.9x more
+		 * under ICU than under C, and the difference grows with the data, so
+		 * procost alone cannot express it.
 		 */
 		cost.startup = 0.0;
 		cost.per_tuple = 0.0;
