@@ -25,9 +25,10 @@ BEGIN
 END
 $$;
 
-CREATE TABLE sort_cost_t (t text);
+CREATE TABLE sort_cost_t (t text, i int, n numeric, u uuid);
 INSERT INTO sort_cost_t
-    SELECT 'value' || lpad(g::text, 6, '0') FROM generate_series(1, 2000) g;
+    SELECT 'value' || lpad(g::text, 6, '0'), g, g, md5(g::text)::uuid
+      FROM generate_series(1, 2000) g;
 ANALYZE sort_cost_t;
 
 -- The scan alone, so that the comparison component can be isolated from the
@@ -85,6 +86,22 @@ SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "en-x-icu"'
            AS icu_costs_much_more
   FROM sort_cost_base;
 \endif
+
+-- The catalog gives the comparators whose cost is well above int4 a procost
+-- of their own (numeric_cmp 1.15, interval_cmp 1.20, btnamecmp 1.55,
+-- uuid_cmp 2.40; see src/tools/measure_sort_cost.sql for the measurements), and
+-- a sort of that type is charged accordingly.
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY u') - scan)
+           BETWEEN 2.3 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+               AND 2.5 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+           AS uuid_comparator_cost
+  FROM sort_cost_base;
+
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY n') - scan)
+           BETWEEN 1.10 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+               AND 1.20 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+           AS numeric_comparator_cost
+  FROM sort_cost_base;
 
 -- MergeAppend merges with the same comparators a sort uses, and was charged
 -- the flat amount before this change.

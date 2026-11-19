@@ -2275,11 +2275,11 @@ sort_provider_cost_factor(Oid collid)
  *
  * A sort comparator is an ordinary function, and PostgreSQL already carries a
  * per-function cost estimate for exactly this purpose: pg_proc.procost, which
- * today is 1.0 for every comparator in the system (btint4cmp, uuid_cmp,
- * interval_cmp, network_cmp, btnamecmp and the rest all read 1).  Rather than
- * hardcoding a table of type OIDs here, derive the charge from the comparator
- * the sort will actually call, so the relative costs can be expressed as data
- * and adjusted without touching the planner.
+ * is 1.0 by default and is set for the comparators whose work is more expensive
+ * than the reference (uuid_cmp 2.40, btnamecmp 1.55, interval_cmp 1.20,
+ * numeric_cmp 1.15).  Rather than hardcoding a table of type OIDs here, derive
+ * the charge from the comparator the sort will actually call, so the relative
+ * costs can be expressed as data and adjusted without touching the planner.
  *
  * The comparator is scaled so that a procost of 1.0 reproduces today's flat
  * charge exactly; a type measured at twice its reference needs procost 2.0.
