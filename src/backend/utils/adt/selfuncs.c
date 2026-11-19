@@ -4163,6 +4163,182 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 }
 
 /*
+ * varinfo_index_for_attnum
+ *		Position of the given column in the varinfos list, or -1 if absent.
+ */
+static int
+varinfo_index_for_attnum(List *varinfos, AttrNumber attnum)
+{
+	ListCell   *lc;
+	int			i = 0;
+
+	foreach(lc, varinfos)
+	{
+		Var		   *var = (Var *) ((GroupVarInfo *) lfirst(lc))->var;
+
+		if (IsA(var, Var) && var->varattno == attnum)
+			return i;
+		i++;
+	}
+
+	return -1;
+}
+
+/*
+ * selfjoin_dependencies_selectivity
+ *		Selectivity of a self-join's column set, adjusted for functional
+ *		dependencies between the columns.
+ *
+ * dependencies_clauselist_selectivity() applies functional dependencies to
+ * restriction clauses on one relation.  A self-join reads the same joint
+ * distribution, so the same conditional probabilities apply: for a dependency
+ * of degree f whose first nattributes - 1 columns imply the last,
+ *
+ *	   P(b|a) = f * Min(P(a), P(b)) / P(a) + (1 - f) * P(b)
+ *
+ * which is the formula the core uses.  Columns the statistics object does not
+ * cover keep their independent selectivity.
+ *
+ * Returns the selectivity, or -1.0 when no dependencies object covers at least
+ * two of the columns.
+ */
+static double
+selfjoin_dependencies_selectivity(RelOptInfo *rel, List *varinfos)
+{
+	StatisticExtInfo *best = NULL;
+	int			best_matched = 0;
+	MVDependencies *deps;
+	double	   *attr_sel;
+	double		result = 1.0;
+	int			nattrs = list_length(varinfos);
+	int			i;
+	ListCell   *lc;
+
+	if (!has_stats_of_kind(rel->statlist, STATS_EXT_DEPENDENCIES))
+		return -1.0;
+
+	/* Use the statistics object covering the most of our columns. */
+	foreach(lc, rel->statlist)
+	{
+		StatisticExtInfo *info = (StatisticExtInfo *) lfirst(lc);
+		int			matched = 0;
+		ListCell   *lc2;
+
+		if (info->kind != STATS_EXT_DEPENDENCIES)
+			continue;
+
+		foreach(lc2, varinfos)
+		{
+			Var		   *var = (Var *) ((GroupVarInfo *) lfirst(lc2))->var;
+
+			if (IsA(var, Var) && bms_is_member(var->varattno, info->keys))
+				matched++;
+		}
+
+		if (matched > best_matched)
+		{
+			best_matched = matched;
+			best = info;
+		}
+	}
+
+	if (best == NULL || best_matched < 2)
+		return -1.0;
+
+	deps = statext_dependencies_load(best->statOid, false);
+	attr_sel = palloc_array(double, nattrs);
+
+	i = 0;
+	foreach(lc, varinfos)
+		attr_sel[i++] = 1.0 / ((GroupVarInfo *) lfirst(lc))->ndistinct;
+
+	/*
+	 * Apply the dependencies in reverse order, as the core does, so that a
+	 * column implied by an earlier dependency is corrected first.
+	 */
+	for (i = (int) deps->ndeps - 1; i >= 0; i--)
+	{
+		MVDependency *dep = deps->deps[i];
+		double		s1 = 1.0;
+		int			implied;
+		int			j;
+
+		implied = varinfo_index_for_attnum(varinfos,
+										   dep->attributes[dep->nattributes - 1]);
+		if (implied < 0)
+			continue;
+
+		/* All but the last attribute imply the last one. */
+		for (j = 0; j < dep->nattributes - 1; j++)
+		{
+			int			idx = varinfo_index_for_attnum(varinfos, dep->attributes[j]);
+
+			if (idx < 0)
+				break;
+			s1 *= attr_sel[idx];
+		}
+
+		/* Apply nothing when the implying columns are not all in the join. */
+		if (j < dep->nattributes - 1)
+			continue;
+
+		if (s1 <= attr_sel[implied])
+			attr_sel[implied] = dep->degree +
+				(1.0 - dep->degree) * attr_sel[implied];
+		else
+			attr_sel[implied] = dep->degree * attr_sel[implied] / s1 +
+				(1.0 - dep->degree) * attr_sel[implied];
+	}
+
+	for (i = 0; i < nattrs; i++)
+		result *= attr_sel[i];
+
+	pfree(attr_sel);
+	return result;
+}
+
+/*
+ * selfjoin_mcv_list
+ *		Return the multivariate MCV list that covers exactly the given columns.
+ *
+ * Only an exact match can be used: a list over a superset of the columns
+ * describes different groups, and its frequencies say nothing about the
+ * projection onto the join columns.
+ */
+static MCVList *
+selfjoin_mcv_list(RelOptInfo *rel, List *vars)
+{
+	ListCell   *lc;
+	Bitmapset  *attnums = NULL;
+
+	if (!has_stats_of_kind(rel->statlist, STATS_EXT_MCV))
+		return NULL;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+
+		attnums = bms_add_member(attnums, var->varattno);
+	}
+
+	foreach(lc, rel->statlist)
+	{
+		StatisticExtInfo *info = (StatisticExtInfo *) lfirst(lc);
+
+		if (info->kind != STATS_EXT_MCV)
+			continue;
+		if (!bms_equal(info->keys, attnums))
+			continue;
+
+		bms_free(attnums);
+		return statext_mcv_load(info->statOid, false);
+	}
+
+	bms_free(attnums);
+	return NULL;
+}
+
+/*
  * estimate_selfjoin_selectivity
  *		Estimate the selectivity of a multi-clause join of a relation to itself
  *		from the joint statistics of the join columns.
@@ -4286,11 +4462,26 @@ estimate_selfjoin_selectivity(PlannerInfo *root,
 			ndistinct *= mvndistinct;
 		else
 		{
-			foreach(lc, varinfos)
-			{
-				GroupVarInfo *varinfo = (GroupVarInfo *) lfirst(lc);
+			double		depsel;
 
-				ndistinct *= varinfo->ndistinct;
+			/*
+			 * No ndistinct statistics for this set.  Fall back on per-column
+			 * counts, adjusted for any functional dependencies the relation
+			 * has, which the independent product would ignore.
+			 */
+			depsel = selfjoin_dependencies_selectivity(outer_rel, varinfos);
+			if (depsel > 0.0)
+			{
+				ndistinct *= 1.0 / depsel;
+			}
+			else
+			{
+				foreach(lc, varinfos)
+				{
+					GroupVarInfo *varinfo = (GroupVarInfo *) lfirst(lc);
+
+					ndistinct *= varinfo->ndistinct;
+				}
 			}
 			varinfos = NIL;
 		}
@@ -4298,6 +4489,51 @@ estimate_selfjoin_selectivity(PlannerInfo *root,
 
 	if (ndistinct < 1.0)
 		return 1.0;
+
+	/*
+	 * A multivariate MCV list holds the actual frequencies of the most common
+	 * combinations.  The uniform model below assumes every distinct
+	 * combination occurs equally often, which understates a skewed self-join;
+	 * when the list is available, use the real frequencies for the values it
+	 * covers and the uniform model only for the remainder.
+	 */
+	{
+		MCVList    *mcv = selfjoin_mcv_list(outer_rel, vars);
+
+		if (mcv != NULL)
+		{
+			double		sel = 0.0;
+			double		sumf = 0.0;
+			double		rest;
+			int			i;
+			int			j;
+
+			for (i = 0; i < mcv->nitems; i++)
+			{
+				bool		hasnull = false;
+
+				for (j = 0; j < mcv->ndimensions; j++)
+				{
+					if (mcv->items[i].isnull[j])
+					{
+						hasnull = true;
+						break;
+					}
+				}
+				if (hasnull)
+					continue;
+
+				sel += mcv->items[i].frequency * mcv->items[i].frequency;
+				sumf += mcv->items[i].frequency;
+			}
+
+			rest = Max(1.0 - sumf, 0.0);
+			sel += (rest * rest) / Max(ndistinct - (double) mcv->nitems, 1.0);
+
+			if (sel > 0.0)
+				return Min(sel, 1.0);
+		}
+	}
 
 	return 1.0 / ndistinct;
 }
