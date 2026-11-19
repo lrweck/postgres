@@ -1954,3 +1954,27 @@ SELECT most_common_elems, most_common_elem_freqs
   FROM pg_stats_ext_exprs WHERE statistics_name = 'stats_ext_mcelem';
 SELECT * FROM stats_ext_tbl_mcelem WHERE (a || a) @> '{1}';
 DROP TABLE stats_ext_tbl_mcelem;
+
+--
+-- Estimation of a relation joined to itself.
+--
+-- A multi-clause self-join multiplies the per-clause selectivities, which takes
+-- the joint distinct count to be the product of the per-column counts.  Both
+-- aliases read the same statistics, so the joint information the relation has
+-- can be used.
+--
+CREATE TABLE stats_ext_self (a int, b int) WITH (autovacuum_enabled = off);
+INSERT INTO stats_ext_self SELECT i % 50, (i % 50) / 5 FROM generate_series(1, 2000) i;
+ANALYZE stats_ext_self;
+
+-- no statistics object: the independence product, well below the truth
+SELECT * FROM check_estimated_rows('SELECT * FROM stats_ext_self x, stats_ext_self y WHERE x.a = y.a AND x.b = y.b');
+
+CREATE STATISTICS stats_ext_self_nd (ndistinct) ON a, b FROM stats_ext_self;
+ANALYZE stats_ext_self;
+
+-- the joint distinct count reproduces the actual size
+SELECT * FROM check_estimated_rows('SELECT * FROM stats_ext_self x, stats_ext_self y WHERE x.a = y.a AND x.b = y.b');
+
+DROP STATISTICS stats_ext_self_nd;
+DROP TABLE stats_ext_self;
