@@ -13654,3 +13654,219 @@ $$);
 RESET enable_hashjoin;
 RESET enable_mergejoin;
 DROP TABLE join_est_pk2, join_est_o2;
+-- A join column that is restricted by a comparison on itself sees only part of
+-- its distribution, so the join is estimated from the conditional distribution
+-- rather than from the whole column.  It matters when the restriction excludes a
+-- most common value: here a third of each table holds k = 0, and the join on the
+-- other values must not be multiplied by that value's frequency.
+CREATE TABLE join_est_res (k int, payload text);
+INSERT INTO join_est_res SELECT CASE WHEN g <= 1000 THEN 0 ELSE g - 1000 END,
+                            CASE WHEN g % 2 = 0 THEN 'x' ELSE 'z' END
+                     FROM generate_series(1, 3000) g;
+CREATE TABLE join_est_res2 (k int, payload text);
+INSERT INTO join_est_res2 SELECT * FROM join_est_res;
+ANALYZE join_est_res;
+ANALYZE join_est_res2;
+-- The values that fail the restriction are dropped and the rest are rescaled.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k > 0
+$$);
+ estimated | actual 
+-----------+--------
+      2999 |   2000
+(1 row)
+
+-- A restriction that keeps every value changes nothing; one that keeps only the
+-- most common value rescales it to the whole column.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k >= 0
+$$);
+ estimated | actual  
+-----------+---------
+   1002000 | 1002000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k <= 0
+$$);
+ estimated | actual  
+-----------+---------
+    999800 | 1000000
+(1 row)
+
+-- Every strict comparison works, not only the inequalities.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k = 5
+$$);
+ estimated | actual 
+-----------+--------
+         1 |      1
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k <> 0
+$$);
+ estimated | actual 
+-----------+--------
+      2999 |   2000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k BETWEEN 100 AND 200
+$$);
+ estimated | actual 
+-----------+--------
+       151 |    101
+(1 row)
+
+-- The column may be the right operand, the restriction may come as a list, and
+-- the constant may have another type; none of that changes the comparison.  A
+-- NULL in the list excludes nothing, and "NOT IN" is an ALL clause, which is not
+-- a restriction of this form.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE 0 < a.k
+$$);
+ estimated | actual 
+-----------+--------
+      2999 |   2000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k IN (1, 2, 3)
+$$);
+ estimated | actual 
+-----------+--------
+         4 |      3
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k IN (1, 2, NULL)
+$$);
+ estimated | actual 
+-----------+--------
+         3 |      2
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k NOT IN (1, 2)
+$$);
+ estimated | actual  
+-----------+---------
+   1001332 | 1001998
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k > 0::bigint
+$$);
+ estimated | actual 
+-----------+--------
+      2999 |   2000
+(1 row)
+
+-- A collatable key works through LIKE and through a comparison that needs the
+-- clause's collation.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.payload = b.payload
+    WHERE a.payload < 'y'
+$$);
+ estimated | actual  
+-----------+---------
+   2250000 | 2250000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.payload = b.payload
+    WHERE a.payload LIKE 'x%'
+$$);
+ estimated | actual  
+-----------+---------
+   2250000 | 2250000
+(1 row)
+
+-- A restriction on another column says nothing about which key values survive,
+-- so it leaves the join estimate alone.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.payload = 'x'
+$$);
+ estimated | actual 
+-----------+--------
+    501000 | 501000
+(1 row)
+
+-- The restriction may be written on either side of the join, and the estimates
+-- of a self-join, a semi-join and a three-way join take the same path.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE b.k > 0
+$$);
+ estimated | actual 
+-----------+--------
+      2999 |   2000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res b ON a.k = b.k
+    WHERE a.k > 0
+$$);
+ estimated | actual 
+-----------+--------
+      2999 |   2000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+         JOIN join_est_res2 c ON a.k = c.k
+    WHERE a.k > 0
+$$);
+ estimated | actual 
+-----------+--------
+      4496 |   2000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a
+    WHERE a.k > 0 AND a.k IN (SELECT k FROM join_est_res2)
+$$);
+ estimated | actual 
+-----------+--------
+      2000 |   2000
+(1 row)
+
+-- A nullable key: a strict restriction removes the nulls, and IS NOT NULL is one
+-- of them, so the surviving rows are no longer charged that fraction.
+CREATE TABLE join_est_resn (k int);
+INSERT INTO join_est_resn SELECT CASE WHEN g % 2 = 0 THEN NULL ELSE 1 + g % 100 END
+                        FROM generate_series(1, 2000) g;
+ANALYZE join_est_resn;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_resn a JOIN join_est_resn b ON a.k = b.k
+    WHERE a.k > 50
+$$);
+ estimated | actual 
+-----------+--------
+     10000 |  10000
+(1 row)
+
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_resn a JOIN join_est_resn b ON a.k = b.k
+    WHERE a.k IS NOT NULL
+$$);
+ estimated | actual 
+-----------+--------
+     20000 |  20000
+(1 row)
+
+DROP TABLE join_est_res, join_est_res2, join_est_resn;
+DROP FUNCTION check_join_est_rows(text);
