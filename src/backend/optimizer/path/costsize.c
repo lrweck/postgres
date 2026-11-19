@@ -501,9 +501,9 @@ cost_gather_merge(GatherMergePath *path, PlannerInfo *root,
 	logN = LOG2(N);
 
 	/*
-	 * Assumed cost per tuple comparison.  As in cost_merge_append(), the
-	 * heap merge compares with the same btree ordering comparators a sort
-	 * uses.
+	 * Assumed cost per tuple comparison.  The heap merge compares with the
+	 * same ordering comparators a sort uses, so it pays the same extra
+	 * per-comparison cost.
 	 */
 	comparison_cost = 2.0 * cpu_operator_cost +
 		sort_comparison_cost(root, path->path.pathkeys);
@@ -1998,9 +1998,10 @@ cost_tuplesort(Cost *startup_cost, Cost *run_cost,
 
 		/*
 		 * The number of runs follows from the in-memory footprint, not from
-		 * the tape size: run generation also holds one SortTuple per tuple,
-		 * which is why dividing the data volume by sort_mem underestimates
-		 * the run count and, at a run-count boundary, the merge passes.
+		 * the data volume alone: run generation also holds one SortTuple per
+		 * tuple, which is why dividing the data volume by sort_mem
+		 * underestimates the run count and, at a run-count boundary, the
+		 * merge passes.
 		 */
 		double		nruns = tuplesort_run_count(tuples, input_bytes,
 												sort_mem_bytes);
@@ -2216,11 +2217,12 @@ cost_incremental_sort(Path *path,
  * sort_provider_cost_factor
  *		Relative cost of comparing two values of the given collation.
  *
- * A sort builds abbreviated keys and only falls back to the full
- * collation-aware comparison when two abbreviations tie.  Whether abbreviation
- * is available at all is a property of the collation provider, and that is the
- * first-order effect: sorting 1M distinct values in memory on one machine, the
- * total sort time against COLLATE "C" on the same data is
+ * Sorting text builds abbreviated keys when the collation allows it, and falls
+ * back to the full collation-aware comparison when two abbreviations tie or when
+ * there are none.  Whether abbreviation is available at all is a property of the
+ * collation provider, and that is the first-order effect: sorting 1M distinct
+ * values in memory on one machine, the total sort time against COLLATE "C" on
+ * the same data is
  *
  *	   builtin (ucs_basic, pg_c_utf8)	1.02x - 1.06x
  *	   ICU				1.24x - 3.19x
@@ -2238,7 +2240,7 @@ cost_incremental_sort(Path *path,
  * comparison.  Expressed on that component, reproducing the measured total time
  * of a 1M-row sort needs 1.37x to 4.41x depending on the data above; 2.4 is
  * close to their geometric mean (2.29), so no case is off by more than about
- * 75% and the common case is centered.  Undercharging keeps today's plans;
+ * 1.9x and the common case is centered.  Undercharging keeps today's plans;
  * overcharging flips them for no reason, which is why this is centred rather
  * than set to the worst case.
  *
@@ -2302,10 +2304,7 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 		Oid			cmpfunc = InvalidOid;
 		ListCell   *lc2;
 
-		/*
-		 * Volatile expressions are charged through the general expression
-		 * evaluation costs, not here.
-		 */
+		/* A volatile key's cost is not the comparator's to estimate. */
 		if (pathkey->pk_eclass->ec_has_volatile)
 			continue;
 
@@ -2335,9 +2334,10 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 		 * function the chance to do better, so a type can express its own
 		 * comparison cost without this file knowing anything about it.
 		 *
-		 * procost is in cpu_operator_cost units and the flat charge is two of
-		 * them, so scaling by two keeps a procost of 1.0 a no-op: a system
-		 * whose comparators are all at the default is unaffected.
+		 * procost is expressed in cpu_operator_cost units and the flat charge
+		 * is two of those units, so scaling by two keeps a procost of 1.0 a
+		 * no-op: a system whose comparators are all at the default is
+		 * unaffected.
 		 */
 		/*
 		 * Pass the sort key expression, not NULL: a prosupport cost function

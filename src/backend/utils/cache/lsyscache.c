@@ -4105,6 +4105,8 @@ get_collation_is_c(Oid colloid)
 /*
  * get_collation_provider
  *		Return the provider of a collation, as a COLLPROVIDER_* character.
+ *
+ * The caller must pass a valid collation OID.
  */
 char
 get_collation_provider(Oid colloid)
