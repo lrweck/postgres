@@ -227,6 +227,11 @@ extern double estimate_num_groups(PlannerInfo *root, List *groupExprs,
 								  double input_rows, List **pgset,
 								  EstimationInfo *estinfo);
 
+extern double estimate_selfjoin_selectivity(PlannerInfo *root,
+											RelOptInfo *outer_rel,
+											RelOptInfo *inner_rel,
+											List *restrictlist);
+
 extern List *estimate_multivariate_bucketsize(PlannerInfo *root,
 											  RelOptInfo *inner,
 											  List *hashclauses,
