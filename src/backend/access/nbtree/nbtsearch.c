@@ -1770,6 +1770,7 @@ _bt_looseskip(IndexScanDesc scan)
 	Page		page;
 	BTPageOpaque opaque;
 	IndexTuple	itup;
+	OffsetNumber offnum;
 	BlockNumber blkno;
 	int			lo,
 				hi;
@@ -1811,6 +1812,83 @@ _bt_looseskip(IndexScanDesc scan)
 	key = _bt_mkscankey(rel, itup);
 	key->keysz = so->nskipatts;
 	key->scantid = NULL;
+
+	/*
+	 * Array (ScalarArrayOp) keys track their own progress through the index
+	 * and are advanced by _bt_checkkeys while pages are read.  A re-descent
+	 * can jump past states they have not reached, so only use it for plain
+	 * scans.  The leaf walk is always safe.
+	 */
+	if (so->skipdescend && so->numArrayKeys == 0)
+	{
+		BlockNumber nextblk,
+					lastblk;
+
+		/*
+		 * Descend to the first tuple strictly greater than the group key.
+		 * Only the leading so->nskipatts columns are compared, so this works
+		 * for multi-column DISTINCT without a row-comparison operator.
+		 */
+		key->nextkey = true;
+		key->backward = false;
+
+		/* Release the current leaf page before searching again */
+		_bt_unlockbuf(rel, so->currPos.buf);
+		if (so->numKilled > 0)
+			_bt_killitems(scan);
+		_bt_savemark(scan);
+		BTScanPosUnpinIfPinned(so->currPos);
+
+		_bt_search(rel, NULL, key, &so->currPos.buf, BT_READ, false);
+		if (!BufferIsValid(so->currPos.buf))
+		{
+			/* Concurrent truncation left nothing to scan */
+			BTScanPosInvalidate(so->currPos);
+			so->skipdone = true;
+			pfree(key);
+			return true;
+		}
+
+		offnum = _bt_binsrch(rel, key, so->currPos.buf);
+		so->currPos.moreLeft = true;
+		so->currPos.moreRight = true;
+
+		if (_bt_readpage(scan, ForwardScanDirection, offnum, false))
+		{
+			/* _bt_next() must return the item at firstItem */
+			so->currPos.itemIndex = so->currPos.firstItem - 1;
+			_bt_drop_lock_and_maybe_pin(rel, so);
+			pfree(key);
+			return true;
+		}
+
+		/* No matching tuples between offnum and the end of this page */
+		if (!so->currPos.moreRight || so->currPos.nextPage == P_NONE)
+		{
+			so->currPos.itemIndex = so->currPos.lastItem;
+			_bt_drop_lock_and_maybe_pin(rel, so);
+			pfree(key);
+			return true;
+		}
+
+		nextblk = so->currPos.nextPage;
+		lastblk = so->currPos.currPage;
+		_bt_unlockbuf(rel, so->currPos.buf);
+		BTScanPosUnpin(so->currPos);
+
+		if (!_bt_readnextpage(scan, nextblk, lastblk,
+							  ForwardScanDirection, false))
+		{
+			/* Ran off the end of the index during this skip */
+			so->skipdone = true;
+			pfree(key);
+			return true;
+		}
+
+		so->currPos.itemIndex = so->currPos.firstItem - 1;
+		pfree(key);
+		return true;
+	}
 
 	/* Find the last item of this group on the current page */
 	lo = so->currPos.itemIndex;

@@ -5424,7 +5424,8 @@ make_loose_distinct_path(PlannerInfo *root, RelOptInfo *input_rel,
 	skip = palloc(sizeof(IndexPath));
 	memcpy(skip, ipath, sizeof(IndexPath));
 	skip->indexskipatts = nskip;
-	cost_skipscan_index(skip, root, numDistinctRows, nskip);
+	cost_skipscan_index(skip, root, numDistinctRows, nskip,
+						&skip->indexskipdescend);
 
 	return skip;
 }

@@ -2087,6 +2087,7 @@ typedef struct IndexPath
 	 * remaining filter quals.
 	 */
 	int			indexskipatts;
+	bool		indexskipdescend;	/* skip by re-descending the tree */
 	Cost		indextotalcost;
 	Selectivity indexselectivity;
 } IndexPath;

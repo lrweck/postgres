@@ -179,6 +179,7 @@ typedef struct IndexScanDescData
 	 * accepted by all quals.
 	 */
 	int			xs_num_skip_atts;
+	bool		xs_skip_descend;	/* skip by descending, not by walking */
 	bool		(*xs_skip_group) (struct IndexScanDescData *scan);
 
 	/* Table access method's private state (not used during bitmap scans) */

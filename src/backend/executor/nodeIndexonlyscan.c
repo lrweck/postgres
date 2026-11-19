@@ -95,6 +95,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		Assert(node->ioss_ScanDesc->xs_want_itup);
 
 		scandesc->xs_num_skip_atts = node->ioss_NumSkipAtts;
+		scandesc->xs_skip_descend = node->ioss_SkipDescend;
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -391,6 +392,7 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
 
 	indexstate->ioss_NumSkipAtts = node->indexskipatts;
+	indexstate->ioss_SkipDescend = node->indexskipdescend;
 	indexstate->ioss_SkipPending = false;
 
 	/*

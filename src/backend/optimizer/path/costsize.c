@@ -837,16 +837,18 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
  */
 void
 cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
-					int nskipatts)
+					int nskipatts, bool *descend)
 {
 	RelOptInfo *baserel = path->path.parent;
 	IndexOptInfo *index = path->indexinfo;
 	double		index_pages = (double) index->pages;
 	double		spc_random_page_cost;
 	double		spc_seq_page_cost;
-	double		pages_touched;
+	double		walk_pages;
 	double		cpu_per_group;
 	Cost		startup_cost;
+	Cost		walk_cost;
+	Cost		descend_cost;
 	Cost		run_cost;
 
 	Assert(IsA(baserel, RelOptInfo));
@@ -863,27 +865,36 @@ cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
 							  &spc_seq_page_cost);
 
 	/*
-	 * The leaf level is a linked list: skipping a group still means visiting
-	 * (not processing) every leaf page between groups.  For a full DISTINCT
-	 * that is the whole scanned index range, so charge the same I/O as an
-	 * ordinary index scan of that range.  What a loose scan avoids is the
-	 * per-tuple work: one tuple per group instead of every entry.
+	 * Two ways to get to the next group:
 	 *
-	 * ponytail: indexselectivity is a table-tuple fraction, not an exact
-	 * index-range fraction.  For a qual on the leading columns it is within a
-	 * factor of two; refine with amcostestimate's index_pages if that matters.
+	 * walk: keep the scan on the leaf level and follow btpo_next, comparing
+	 * high keys.  The leaf level is a linked list, so this visits (but does
+	 * not process) every page in the scanned range.
+	 *
+	 * descend: search the tree for the first tuple greater than the current
+	 * group key.  That is tree_height internal page visits plus one leaf page
+	 * per group, but no walk through unrelated leaves.
+	 *
+	 * Internal pages are usually cached, so charge them at cpu_operator_cost
+	 * and only the leaf at random_page_cost.  Pick the cheaper one.
 	 */
-	pages_touched = Max(1.0, path->indexselectivity * index_pages);
-	pages_touched = Min(index_pages, pages_touched);
+	walk_pages = Max(1.0, path->indexselectivity * index_pages);
+	walk_pages = Min(index_pages, walk_pages);
 
-	/* One descent for the whole scan, then one tuple/qual/heap visit per group */
 	startup_cost = baserel->baserestrictcost.startup +
 		ceil(log(index_pages + 1.0) / log(2.0)) * spc_random_page_cost;
 	cpu_per_group = cpu_index_tuple_cost +
 		baserel->baserestrictcost.per_tuple +
 		cpu_tuple_cost;
-	run_cost = pages_touched * spc_random_page_cost +
+
+	walk_cost = walk_pages * spc_random_page_cost +
 		numGroups * cpu_per_group;
+	descend_cost = numGroups * spc_random_page_cost +
+		numGroups * Max(1, index->tree_height) * cpu_operator_cost +
+		numGroups * cpu_per_group;
+
+	*descend = (descend_cost < walk_cost);
+	run_cost = *descend ? descend_cost : walk_cost;
 
 	path->path.rows = numGroups;
 	path->indexselectivity = Min(1.0, numGroups / Max(1.0, baserel->tuples));

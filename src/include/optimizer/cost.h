@@ -84,7 +84,8 @@ extern void cost_samplescan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 extern void cost_index(IndexPath *path, PlannerInfo *root,
 					   double loop_count, bool partial_path);
 extern void cost_skipscan_index(IndexPath *path, PlannerInfo *root,
-								double numGroups, int nskipatts);
+								double numGroups, int nskipatts,
+								bool *descend);
 extern void cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 								  ParamPathInfo *param_info,
 								  Path *bitmapqual, double loop_count);

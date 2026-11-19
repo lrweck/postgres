@@ -1797,6 +1797,7 @@ typedef struct IndexOnlyScanState
 	SharedIndexScanInstrumentation *ioss_SharedInfo;
 	Size		ioss_PscanLen;
 	int			ioss_NumSkipAtts;	/* loose scan: leading DISTINCT columns */
+	bool		ioss_SkipDescend;	/* skip by re-descending the tree */
 	bool		ioss_SkipPending;	/* skip the previous tuple's group next time */
 } IndexOnlyScanState;
 

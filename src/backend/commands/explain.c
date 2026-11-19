@@ -1708,11 +1708,18 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				if (indexonlyscan->indexskipatts > 0)
 				{
 					if (es->format == EXPLAIN_FORMAT_TEXT)
-						appendStringInfo(es->str, "\n  Skip Atts: %d",
-										 indexonlyscan->indexskipatts);
+						appendStringInfo(es->str, "\n  Skip Atts: %d (%s)",
+										 indexonlyscan->indexskipatts,
+										 indexonlyscan->indexskipdescend ?
+										 "descend" : "walk");
 					else
+					{
 						ExplainPropertyInteger("Skip Atts", NULL,
 											   indexonlyscan->indexskipatts, es);
+						ExplainPropertyText("Skip Mode",
+											indexonlyscan->indexskipdescend ?
+											"descend" : "walk", es);
+					}
 				}
 			}
 			break;

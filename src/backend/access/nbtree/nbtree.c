@@ -243,6 +243,10 @@ btgettuple(IndexScanDesc scan, ScanDirection dir)
 	/* btree indexes are never lossy */
 	scan->xs_recheck = false;
 
+	/* A loose-scan re-descent may have run off the end of the index */
+	if (so->skipdone)
+		return false;
+
 	/* Each loop iteration performs another primitive index scan */
 	do
 	{
@@ -364,6 +368,8 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 
 	so->skipScan = false;
 	so->nskipatts = 0;
+	so->skipdescend = false;
+	so->skipdone = false;
 	so->needPrimScan = false;
 	so->scanBehind = false;
 	so->oppositeDirCheck = false;
@@ -431,6 +437,8 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 				   scan->heapRelation != NULL);
 
 	so->nskipatts = scan->xs_num_skip_atts;
+	so->skipdescend = scan->xs_skip_descend;
+	so->skipdone = false;
 	so->markItemIndex = -1;
 	so->needPrimScan = false;
 	so->scanBehind = false;

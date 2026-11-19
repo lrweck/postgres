@@ -1059,6 +1059,8 @@ typedef struct BTScanOpaqueData
 
 	/* loose (skip) scan: number of leading index columns per group */
 	int			nskipatts;
+	bool		skipdescend;	/* re-descend per group instead of walking */
+	bool		skipdone;		/* a re-descent landed past the last tuple */
 
 	/* workspace for SK_SEARCHARRAY support */
 	int			numArrayKeys;	/* number of equality-type array keys */

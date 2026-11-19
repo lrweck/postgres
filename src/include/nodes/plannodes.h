@@ -666,6 +666,7 @@ typedef struct IndexOnlyScan
 	ScanDirection indexorderdir;
 	/* loose scan: number of leading DISTINCT index columns (0 = off) */
 	int			indexskipatts;
+	bool		indexskipdescend;	/* skip by re-descending the tree */
 } IndexOnlyScan;
 
 /* ----------------
