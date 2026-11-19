@@ -2462,6 +2462,273 @@ rowcomparesel(PlannerInfo *root,
 	return s1;
 }
 
+/* one restriction on a join column, and which side of it the column is on */
+typedef struct
+{
+	RestrictInfo *rinfo;		/* the clause, also used for its selectivity */
+	bool		var_left;		/* is the column the operator's left input? */
+} JoinKeyRestriction;
+
+/*
+ * join_key_clause_matches
+ *		True if a clause restricts the key of 'vardata' by a constant.
+ *
+ * Accepts "key op const", "const op key" and "key = ANY (const array)" with a
+ * strict same-type operator, which is what can be evaluated against a candidate
+ * key value directly.  On success *var_left says which side of the operator the
+ * key is on.
+ */
+static bool
+join_key_clause_matches(Node *key, Node *clause, bool *var_left)
+{
+	if (IsA(clause, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *) clause;
+		Node	   *left;
+		Node	   *right;
+		Node	   *con;
+
+		if (list_length(op->args) != 2 || op->opresulttype != BOOLOID)
+			return false;
+
+		left = (Node *) linitial(op->args);
+		right = (Node *) lsecond(op->args);
+		if (equal(left, key) && IsA(right, Const))
+		{
+			*var_left = true;
+			con = right;
+		}
+		else if (equal(right, key) && IsA(left, Const))
+		{
+			*var_left = false;
+			con = left;
+		}
+		else
+			return false;
+
+		/* op_strict() is a syscache lookup: ask only about the key's clauses. */
+		return !((Const *) con)->constisnull && op_strict(op->opno);
+	}
+	else if (IsA(clause, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+		Const	   *con;
+
+		if (list_length(saop->args) != 2 || !saop->useOr ||
+			!equal((Node *) linitial(saop->args), key) ||
+			!IsA(lsecond(saop->args), Const))
+			return false;
+
+		con = (Const *) lsecond(saop->args);
+		if (con->constisnull || !op_strict(saop->opno))
+			return false;
+
+		*var_left = true;
+		return true;
+	}
+	else if (IsA(clause, NullTest))
+	{
+		NullTest   *nt = (NullTest *) clause;
+
+		if (nt->argisrow || nt->nulltesttype != IS_NOT_NULL ||
+			!equal((Node *) nt->arg, key))
+			return false;
+
+		return true;
+	}
+
+	return false;
+}
+
+/*
+ * satisfies_join_key_restrictions
+ *		True if a key value satisfies all of the given restrictions.
+ *
+ * Every clause has already been accepted by join_key_clause_matches(), so it
+ * only has to be evaluated.  An empty restriction list accepts everything.
+ */
+static bool
+satisfies_join_key_restrictions(List *restrictions, Datum value)
+{
+	ListCell   *lc;
+
+	foreach(lc, restrictions)
+	{
+		JoinKeyRestriction *r = (JoinKeyRestriction *) lfirst(lc);
+		Node	   *clause = (Node *) r->rinfo->clause;
+		FmgrInfo	proc;
+		bool		result;
+
+		if (IsA(clause, NullTest))
+			continue;			/* no value passes it more than another */
+
+		if (IsA(clause, OpExpr))
+		{
+			OpExpr	   *op = (OpExpr *) clause;
+			Const	   *con = (Const *) (r->var_left ?
+										 lsecond(op->args) : linitial(op->args));
+
+			LOCAL_FCINFO(fcinfo, 2);
+
+			fmgr_info(get_opcode(op->opno), &proc);
+			InitFunctionCallInfoData(*fcinfo, &proc, 2, op->inputcollid,
+									 NULL, NULL);
+			fcinfo->args[r->var_left ? 0 : 1].value = value;
+			fcinfo->args[r->var_left ? 1 : 0].value = con->constvalue;
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].isnull = false;
+			fcinfo->isnull = false;
+
+			result = !fcinfo->isnull &&
+				DatumGetBool(FunctionCallInvoke(fcinfo));
+		}
+		else
+		{
+			ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+			ArrayType  *array;
+			Oid			elemtype;
+			int16		elmlen;
+			bool		elmbyval;
+			char		elmalign;
+			Datum	   *elems;
+			bool	   *nulls;
+			int			nelems;
+			int			i;
+
+			array = DatumGetArrayTypeP(((Const *) lsecond(saop->args))->constvalue);
+			elemtype = ARR_ELEMTYPE(array);
+			get_typlenbyvalalign(elemtype, &elmlen, &elmbyval, &elmalign);
+			deconstruct_array(array, elemtype, elmlen, elmbyval, elmalign,
+							  &elems, &nulls, &nelems);
+			fmgr_info(get_opcode(saop->opno), &proc);
+
+			result = false;
+			for (i = 0; i < nelems; i++)
+			{
+				LOCAL_FCINFO(fcinfo, 2);
+
+				if (nulls[i])
+					continue;
+				InitFunctionCallInfoData(*fcinfo, &proc, 2, saop->inputcollid,
+										 NULL, NULL);
+				fcinfo->args[0].value = value;
+				fcinfo->args[1].value = elems[i];
+				fcinfo->args[0].isnull = false;
+				fcinfo->args[1].isnull = false;
+				fcinfo->isnull = false;
+
+				if (!fcinfo->isnull &&
+					DatumGetBool(FunctionCallInvoke(fcinfo)))
+				{
+					result = true;
+					break;
+				}
+			}
+		}
+
+		if (!result)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * restrict_join_key_stats
+ *		Apply restrictions on the join column itself to its MCV list.
+ *
+ * A join column that is also restricted sees only part of its distribution, but
+ * the join selectivity is computed from the statistics of the whole column.  For
+ * a skewed column that is wrong by a lot: if half the rows hold one value and
+ * the restriction excludes that value, the rows that survive are nothing like
+ * the average.
+ *
+ * Only restrictions on the column itself can be applied here, because for those
+ * the conditional distribution is the column's own distribution restricted to
+ * the qualifying values, which is what the MCV list describes.  A restriction on
+ * some other column says nothing about which key values survive.
+ *
+ * Drops the values that fail the restrictions and rescales the frequencies of
+ * the rest to be conditional on them.  The caller must treat the null fraction
+ * as zero afterwards, since a strict restriction removes the nulls.
+ *
+ * Returns true when any value was dropped.
+ */
+static bool
+restrict_join_key_stats(PlannerInfo *root, VariableStatData *vardata,
+						AttStatsSlot *sslot)
+{
+	List	   *restrictions = NIL;
+	List	   *clauses = NIL;
+	ListCell   *lc;
+	double		sel_r;
+	int			i;
+	int			out;
+
+	if (sslot->nvalues == 0 ||
+		!IsA(vardata->var, Var) ||
+		vardata->rel == NULL ||
+		vardata->rel->baserestrictinfo == NIL)
+		return false;
+
+	foreach(lc, vardata->rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		JoinKeyRestriction *r;
+		bool		var_left;
+
+		if (!join_key_clause_matches(vardata->var, (Node *) rinfo->clause, &var_left))
+			continue;
+
+		r = palloc(sizeof(JoinKeyRestriction));
+		r->rinfo = rinfo;
+		r->var_left = var_left;
+		restrictions = lappend(restrictions, r);
+		clauses = lappend(clauses, rinfo);
+	}
+
+	if (restrictions == NIL)
+		return false;
+
+	sel_r = clauselist_selectivity(root, clauses, vardata->rel->relid,
+								   JOIN_INNER, NULL);
+	if (sel_r <= 0.0 || sel_r >= 1.0)
+		return false;
+
+	out = 0;
+	for (i = 0; i < sslot->nvalues; i++)
+	{
+		if (satisfies_join_key_restrictions(restrictions, sslot->values[i]))
+			out++;
+	}
+
+	/*
+	 * A restriction that keeps every value and every row leaves the column
+	 * where it was: rescaling by a selectivity that is 1 up to rounding would
+	 * only move the estimate.  When the restriction does exclude rows, the
+	 * surviving values have to be rescaled even if no MCV was dropped.
+	 */
+	if (out == sslot->nvalues &&
+		(!HeapTupleIsValid(vardata->statsTuple) ||
+		 ((Form_pg_statistic) GETSTRUCT(vardata->statsTuple))->stanullfrac <= 0.0) &&
+		sel_r > 1.0 - 1e-3)
+		return false;
+
+	out = 0;
+	for (i = 0; i < sslot->nvalues; i++)
+	{
+		if (!satisfies_join_key_restrictions(restrictions, sslot->values[i]))
+			continue;
+
+		sslot->values[out] = sslot->values[i];
+		sslot->numbers[out] = sslot->numbers[i] / sel_r;
+		out++;
+	}
+
+	sslot->nvalues = out;
+	return true;
+}
+
 /*
  *		eqjoinsel		- Join selectivity of "="
  */
@@ -2493,6 +2760,8 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	AttStatsSlot sslot2;
 	Form_pg_statistic stats1 = NULL;
 	Form_pg_statistic stats2 = NULL;
+	FormData_pg_statistic stats1_copy;
+	FormData_pg_statistic stats2_copy;
 	bool		have_mcvs1 = false;
 	bool		have_mcvs2 = false;
 	bool	   *hasmatch1 = NULL;
@@ -2546,6 +2815,27 @@ eqjoinsel(PG_FUNCTION_ARGS)
 			have_mcvs2 = get_attstatsslot(&sslot2, vardata2.statsTuple,
 										  STATISTIC_KIND_MCV, InvalidOid,
 										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+	}
+
+	/*
+	 * A join column restricted by a comparison on itself has a different
+	 * distribution than the statistics of the whole column describe.  Apply
+	 * those restrictions to the MCV lists before they are matched; a strict
+	 * restriction also removes the nulls, so the null fraction becomes zero.
+	 */
+	if (have_mcvs1 && stats1 != NULL &&
+		restrict_join_key_stats(root, &vardata1, &sslot1))
+	{
+		stats1_copy = *stats1;
+		stats1_copy.stanullfrac = 0;
+		stats1 = &stats1_copy;
+	}
+	if (have_mcvs2 && stats2 != NULL &&
+		restrict_join_key_stats(root, &vardata2, &sslot2))
+	{
+		stats2_copy = *stats2;
+		stats2_copy.stanullfrac = 0;
+		stats2 = &stats2_copy;
 	}
 
 	/* Prepare info usable by both eqjoinsel_inner and eqjoinsel_semi */
