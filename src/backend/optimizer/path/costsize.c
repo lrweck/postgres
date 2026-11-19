@@ -5833,11 +5833,27 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 	}
 	else
 	{
+		double		selfsel;
+
 		jselec = clauselist_selectivity(root,
 										restrictlist,
 										0,
 										jointype,
 										sjinfo);
+
+		/*
+		 * A multi-clause join of a relation with itself is better estimated
+		 * from the joint distinct count of the join columns than by
+		 * multiplying per-clause selectivities, which assumes an independence
+		 * the relation itself may contradict.
+		 */
+		if (jointype == JOIN_INNER)
+		{
+			selfsel = estimate_selfjoin_selectivity(root, outer_rel, inner_rel,
+													restrictlist);
+			if (selfsel >= 0.0)
+				jselec = selfsel;
+		}
 		pselec = 0.0;			/* not used, keep compiler quiet */
 	}
 

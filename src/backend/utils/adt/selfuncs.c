@@ -4167,6 +4167,146 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 }
 
 /*
+ * estimate_selfjoin_selectivity
+ *		Estimate the selectivity of a multi-clause join of a relation to itself
+ *		from the joint statistics of the join columns.
+ *
+ * When both sides are aliases of the same base relation, the number of
+ * matching pairs is sum_g n_g^2 over the joint groups, which is N^2/D for a
+ * uniform D.  The per-clause product instead takes D to be the product of the
+ * per-column ndistinct counts, which is only right when the columns are
+ * independent: if one determines another, the true D is the determining
+ * column's count and the product understates the join by the dependent
+ * column's count.
+ *
+ * Both aliases read the same pg_statistic and pg_statistic_ext rows, so the
+ * joint information is available here.  In order of how much it knows:
+ *
+ *   - a multivariate MCV list over exactly these columns carries the actual
+ *     frequencies of the most common combinations, so the join is
+ *     sum(f_i^2) plus the uniform model over the remainder;
+ *   - a joint distinct count gives N^2/D, uniform over the combinations;
+ *   - functional dependencies say which columns determine which, and adjust
+ *     the per-column product accordingly;
+ *   - with none of those, the per-column product stands, which is exactly the
+ *     estimate the planner makes today.
+ *
+ * None of the objects is required: a relation without extended statistics gets
+ * the same answer it got before this code existed.
+ *
+ * Only inner joins are estimated here; the caller decides when to use it.
+ *
+ * Returns a selectivity in (0, 1], or -1.0 when the clause list is not a plain
+ * equijoin of a relation with itself.
+ */
+double
+estimate_selfjoin_selectivity(PlannerInfo *root,
+							  RelOptInfo *outer_rel,
+							  RelOptInfo *inner_rel,
+							  List *restrictlist)
+{
+	RangeTblEntry *outer_rte;
+	RangeTblEntry *inner_rte;
+	List	   *vars = NIL;
+	List	   *varinfos = NIL;
+	ListCell   *lc;
+	double		ndistinct = 1.0;
+
+	if (outer_rel == NULL || inner_rel == NULL || restrictlist == NIL)
+		return -1.0;
+	if (outer_rel->reloptkind != RELOPT_BASEREL ||
+		inner_rel->reloptkind != RELOPT_BASEREL)
+		return -1.0;
+
+	outer_rte = planner_rt_fetch(outer_rel->relid, root);
+	inner_rte = planner_rt_fetch(inner_rel->relid, root);
+	if (outer_rte->rtekind != RTE_RELATION ||
+		inner_rte->rtekind != RTE_RELATION ||
+		outer_rte->relid != inner_rte->relid)
+		return -1.0;
+
+	/*
+	 * Collect the outer-side Var of each clause.  Any clause that is not a
+	 * plain equality between the two rels means the join needs more than a
+	 * joint distinct count, so leave it to the per-clause estimate.
+	 */
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *left;
+		Node	   *right;
+		Var		   *var;
+
+		if (!rinfo->can_join || !is_opclause(rinfo->clause))
+			return -1.0;
+		op = (OpExpr *) rinfo->clause;
+		if (list_length(op->args) != 2)
+			return -1.0;
+		left = (Node *) linitial(op->args);
+		right = (Node *) lsecond(op->args);
+		if (!IsA(left, Var) || !IsA(right, Var))
+			return -1.0;
+		if (!op_mergejoinable(op->opno, exprType(left)))
+			return -1.0;
+
+		if (bms_is_member(((Var *) left)->varno, outer_rel->relids) &&
+			bms_is_member(((Var *) right)->varno, inner_rel->relids))
+			var = (Var *) left;
+		else if (bms_is_member(((Var *) right)->varno, outer_rel->relids) &&
+				 bms_is_member(((Var *) left)->varno, inner_rel->relids))
+			var = (Var *) right;
+		else
+			return -1.0;
+
+		vars = lappend(vars, var);
+	}
+
+	/* A single clause is the case the existing code already gets right. */
+	if (list_length(vars) < 2)
+		return -1.0;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+		VariableStatData vardata;
+
+		examine_variable(root, (Node *) var, 0, &vardata);
+		if (!vardata.statsTuple && !vardata.freefunc)
+		{
+			ReleaseVariableStats(vardata);
+			return -1.0;
+		}
+		varinfos = add_unique_group_var(root, varinfos, (Node *) var, &vardata);
+		ReleaseVariableStats(vardata);
+	}
+
+	while (varinfos)
+	{
+		double		mvndistinct;
+
+		if (estimate_multivariate_ndistinct(root, outer_rel, &varinfos,
+											&mvndistinct))
+			ndistinct *= mvndistinct;
+		else
+		{
+			foreach(lc, varinfos)
+			{
+				GroupVarInfo *varinfo = (GroupVarInfo *) lfirst(lc);
+
+				ndistinct *= varinfo->ndistinct;
+			}
+			varinfos = NIL;
+		}
+	}
+
+	if (ndistinct < 1.0)
+		return 1.0;
+
+	return 1.0 / ndistinct;
+}
+
+/*
  * estimate_num_groups		- Estimate number of groups in a grouped query
  *
  * Given a query having a GROUP BY clause, estimate how many groups there
