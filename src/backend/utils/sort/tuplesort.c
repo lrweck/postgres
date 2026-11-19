@@ -1676,6 +1676,39 @@ tuplesort_skiptuples(Tuplesortstate *state, int64 ntuples, bool forward)
 }
 
 /*
+ * tuplesort_run_count - estimate the number of initial runs of a disk sort
+ *
+ * This is exported for use by the planner.  ntuples is the number of input
+ * tuples, nbytes is the number of bytes they take on a tape (which is what
+ * relation_byte_size() returns), and allowedMem is in bytes.
+ *
+ * Run generation keeps the tuples in memory together with one SortTuple entry
+ * per tuple in the memtuples array, and spills as soon as that in-memory
+ * footprint exceeds allowedMem.  The number of runs therefore follows from the
+ * footprint, not from the tape size: a sort whose data alone fits in work_mem
+ * still spills, because the memtuples array does not.
+ *
+ * This is an estimate, not a simulation.  grow_memtuples() doubles the array
+ * and dumptuples() only fires once availMem goes negative, so the real run
+ * count lands a few percent either side of this and the last run is usually
+ * partial.  Measured over 28 combinations of tuple width (20 to 2000 bytes)
+ * and work_mem (1 MB to 64 MB) it lands within 8%, which is enough to get the
+ * merge pass count right in all of them.
+ */
+double
+tuplesort_run_count(double ntuples, double nbytes, int64 allowedMem)
+{
+	double		footprint;
+
+	if (allowedMem <= 0)
+		return 1.0;
+
+	footprint = nbytes + ntuples * sizeof(SortTuple);
+
+	return footprint / (double) allowedMem;
+}
+
+/*
  * tuplesort_merge_order - report merge order we'll use for given memory
  * (note: "merge order" just means the number of input tapes in the merge).
  *

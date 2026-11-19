@@ -1995,7 +1995,15 @@ cost_tuplesort(Cost *startup_cost, Cost *run_cost,
 		 * We'll have to use a disk-based sort of all the tuples
 		 */
 		double		npages = ceil(input_bytes / BLCKSZ);
-		double		nruns = input_bytes / sort_mem_bytes;
+
+		/*
+		 * The number of runs follows from the in-memory footprint, not from
+		 * the tape size: run generation also holds one SortTuple per tuple,
+		 * which is why dividing the data volume by sort_mem underestimates
+		 * the run count and, at a run-count boundary, the merge passes.
+		 */
+		double		nruns = tuplesort_run_count(tuples, input_bytes,
+												sort_mem_bytes);
 		double		mergeorder = tuplesort_merge_order(sort_mem_bytes);
 		double		log_runs;
 		double		npageaccesses;
