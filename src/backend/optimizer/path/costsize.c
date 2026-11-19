@@ -1934,8 +1934,9 @@ cost_recursive_union(Path *runion, Path *nrterm, Path *rterm)
  * total, but we will also need to write and read each tuple once per
  * merge pass.  We expect about ceil(logM(r)) merge passes where r is the
  * number of initial runs formed and M is the merge order used by tuplesort.c.
- * Since the average initial run should be about sort_mem, we have
- *		disk traffic = 2 * relsize * ceil(logM(p / sort_mem))
+ * The number of runs follows from the in-memory footprint (see
+ * tuplesort_run_count()), so we have
+ *		disk traffic = 2 * relsize * ceil(logM(r))
  *		cpu = comparison_cost * t * log2(t)
  *
  * If the sort is bounded (i.e., only the first k result tuples are needed)
@@ -1945,10 +1946,11 @@ cost_recursive_union(Path *runion, Path *nrterm, Path *rterm)
  * The disk traffic is assumed to be 3/4ths sequential and 1/4th random
  * accesses (XXX can't we refine that guess?)
  *
- * By default, we charge two operator evals per tuple comparison, which should
- * be in the right ballpark in most cases.  The caller can tweak this by
- * specifying nonzero comparison_cost; typically that's used for any extra
- * work that has to be done to prepare the inputs to the comparison operators.
+ * The flat charge is two operator evals per tuple comparison, which is right
+ * for a type whose comparator is a single inline test.  Callers that know
+ * better add the comparator's own cost through comparison_cost (see
+ * sort_comparison_cost()); it is added to the flat charge, not substituted for
+ * it.
  *
  * 'tuples' is the number of tuples in the relation
  * 'width' is the average tuple width in bytes
@@ -2358,11 +2360,8 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
  *	  the cost of reading the input data.
  *
  * NOTE: some callers currently pass NIL for pathkeys because they
- * can't conveniently supply the sort keys.  Since this routine doesn't
- * currently do anything with pathkeys anyway, that doesn't matter...
- * but if it ever does, it should react gracefully to lack of key data.
- * (Actually, the thing we'd most likely be interested in is just the number
- * of sort keys, which all callers *could* supply.)
+ * can't conveniently supply the sort keys.  They get the flat per-comparison
+ * charge, since there is no comparator to look up.
  */
 void
 cost_sort(Path *path, PlannerInfo *root,
@@ -2682,7 +2681,7 @@ cost_append(AppendPath *apath, PlannerInfo *root)
  * The heap is never spilled to disk, since we assume N is not very large.
  * So this is much simpler than cost_sort.
  *
- * As in cost_sort, we charge two operator evals per tuple comparison.
+ * As in cost_sort, we charge the same per-comparison cost the sort does.
  *
  * 'pathkeys' is a list of sort keys
  * 'n_streams' is the number of input streams
