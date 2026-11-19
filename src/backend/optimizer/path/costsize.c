@@ -88,6 +88,7 @@
 #include "access/amapi.h"
 #include "access/htup_details.h"
 #include "access/tsmapi.h"
+#include "catalog/pg_statistic.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
@@ -5748,6 +5749,464 @@ get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
+ * relation_has_unique_key_for
+ *		True if the relation has a unique index over exactly these columns.
+ *
+ * Partial indexes count only when the query implies their predicate, and
+ * expression indexes are ignored, as in has_unique_index().
+ */
+static bool
+relation_has_unique_key_for(RelOptInfo *rel, List *vars)
+{
+	Bitmapset  *attnums = NULL;
+	ListCell   *lc;
+	bool		result = false;
+
+	if (rel->reloptkind != RELOPT_BASEREL || rel->tuples <= 0)
+		return false;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+
+		if (var->varattno > 0)
+			attnums = bms_add_member(attnums, var->varattno);
+	}
+
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+		Bitmapset  *indexcols = NULL;
+		int			i;
+
+		if (!index->unique || index->indexprs != NIL ||
+			(index->indpred != NIL && !index->predOK) ||
+			index->nkeycolumns < 1)
+			continue;
+
+		for (i = 0; i < index->nkeycolumns; i++)
+			indexcols = bms_add_member(indexcols, index->indexkeys[i]);
+
+		result = bms_equal(indexcols, attnums);
+		bms_free(indexcols);
+
+		if (result)
+			break;
+	}
+
+	bms_free(attnums);
+	return result;
+}
+
+/*
+ * join_ndistinct_of_vars
+ *		Estimate the joint distinct count of a set of join columns.
+ *
+ * If the columns are exactly a unique key of the relation, their combinations
+ * are all distinct and the count is the relation's row count.  Otherwise the
+ * per-column counts are multiplied, which assumes the columns are independent
+ * and overestimates when they are correlated, so the result is capped at the
+ * relation's row count.
+ *
+ * 'rel' may be a join, where the unique-key test does not apply but the cap
+ * still does, or NULL when nothing is known about it.
+ */
+static double
+join_ndistinct_of_vars(PlannerInfo *root, RelOptInfo *rel, List *vars)
+{
+	double		nd = 1.0;
+	bool		have_rows = (rel != NULL && rel->tuples > 0);
+	ListCell   *lc;
+
+	if (have_rows && relation_has_unique_key_for(rel, vars))
+		return rel->tuples;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+		VariableStatData vardata;
+		bool		isdefault;
+
+		examine_variable(root, (Node *) var, 0, &vardata);
+		nd *= get_variable_numdistinct(&vardata, &isdefault);
+		ReleaseVariableStats(vardata);
+	}
+
+	return have_rows ? Min(nd, rel->tuples) : nd;
+}
+
+/* one column of a unique key, and the clause that equates it to the other side */
+typedef struct
+{
+	AttrNumber	attnum;			/* column of the unique relation */
+	Oid			opno;			/* equality operator used for it */
+	Var		   *other;			/* matching Var of the other side */
+} JoinUniqueKey;
+
+/*
+ * relation_has_composite_unique_index
+ *		True if the relation has a unique index over two or more plain columns.
+ *
+ * This is the cheap test that lets a join relation be dismissed before any work
+ * is done on it: a relation without such an index can never bound a join by its
+ * key, and most relations have no such index.
+ */
+static bool
+relation_has_composite_unique_index(RelOptInfo *rel)
+{
+	ListCell   *lc;
+
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+
+		if (index->unique && index->indexprs == NIL &&
+			(index->indpred == NIL || index->predOK) &&
+			index->nkeycolumns >= 2)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * joinrel_unique_key_selectivity
+ *		Selectivity of a join whose clauses cover a unique key.
+ *
+ * When every column of a unique index on 'uniquerel' is equated to the other
+ * side, a row of the other side matches at most one row of 'uniquerel', so the
+ * join cannot exceed the other input.  Multiplying the per-clause selectivities
+ * does not know this: it treats the key columns as independent, and for a
+ * two-column primary key that understates the join by roughly the number of
+ * distinct values of whichever column is (nearly) determined by the other.
+ *
+ * How many of those rows actually match depends on how much of the other side's
+ * key domain 'uniquerel' covers, so this follows the same reasoning eqjoinsel
+ * applies to a single column: divide by the larger of the two distinct counts.
+ * The other side's joint count is estimated by join_ndistinct_of_vars(); its
+ * row estimate, 'other_rows', bounds that count, because a parameterized path
+ * may be sized before the relation's own tuple count is set, and a joint count
+ * can never exceed the rows it describes.
+ *
+ * Only keys with two or more columns are considered.  eqjoinsel already handles
+ * a single-column unique key with 1/max(nd1, nd2), and with the MCV lists when
+ * both sides have them; that estimate is at least as good as a uniform one, so
+ * it is left alone.
+ *
+ * NULLs need no special rule for the bound itself: equality never matches a
+ * NULL, so "at most one match" holds regardless.  They do reduce how many rows
+ * match anything, so the result is scaled by the non-null fraction of the other
+ * side's key columns, in the same spirit as eqjoinsel's null handling.
+ *
+ * The clauses that equate a key column are returned in *keyclauses.  The caller
+ * divides their combined selectivity out of the clause list estimate before
+ * substituting this one, so that clauses outside the key keep filtering as
+ * before; see the caller for why that is the right composition.
+ *
+ * 'restrictlist' must consist only of plain equalities between the two sides.
+ * Anything else means the join needs more than a key comparison to describe, in
+ * which case this returns -1.0 and the clause list estimate stands.
+ *
+ * Returns the selectivity, or -1.0 when no unique index covers the join columns.
+ */
+static double
+joinrel_unique_key_selectivity(PlannerInfo *root,
+							   RelOptInfo *uniquerel,
+							   RelOptInfo *otherrel,
+							   double other_rows,
+							   List *restrictlist,
+							   double uniquerel_rows,
+							   List **keyclauses)
+{
+	Relids		other_relids = otherrel->relids;
+	JoinUniqueKey *keys;
+	Bitmapset  *joined = NULL;
+	int			nkeys = 0;
+	ListCell   *lc;
+	double		nullfrac = 1.0;
+
+	if (uniquerel->reloptkind != RELOPT_BASEREL ||
+		uniquerel_rows <= 0.0 ||
+		list_length(restrictlist) < 2 ||
+		!relation_has_composite_unique_index(uniquerel))
+		return -1.0;
+
+	keys = palloc_array(JoinUniqueKey, list_length(restrictlist));
+
+	/*
+	 * Collect the columns of this relation that are equated to the other
+	 * side. Any join clause that is not a plain equality between the two
+	 * sides means the join needs more than a key bound, so leave it to the
+	 * caller.
+	 */
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *left;
+		Node	   *right;
+		Var		   *var_this;
+		Var		   *var_other;
+
+		if (!rinfo->can_join || !is_opclause(rinfo->clause))
+			return -1.0;
+		op = (OpExpr *) rinfo->clause;
+		if (list_length(op->args) != 2)
+			return -1.0;
+		left = (Node *) linitial(op->args);
+		right = (Node *) lsecond(op->args);
+		if (!IsA(left, Var) || !IsA(right, Var))
+			return -1.0;
+
+		if (bms_is_member(((Var *) left)->varno, uniquerel->relids) &&
+			bms_is_member(((Var *) right)->varno, other_relids))
+		{
+			var_this = (Var *) left;
+			var_other = (Var *) right;
+		}
+		else if (bms_is_member(((Var *) right)->varno, uniquerel->relids) &&
+				 bms_is_member(((Var *) left)->varno, other_relids))
+		{
+			var_this = (Var *) right;
+			var_other = (Var *) left;
+		}
+		else
+			return -1.0;
+
+		/* System columns (ctid, tableoid) have negative attribute numbers. */
+		if (var_this->varattno > 0)
+		{
+			keys[nkeys].attnum = var_this->varattno;
+			keys[nkeys].opno = op->opno;
+			keys[nkeys].other = var_other;
+			nkeys++;
+			joined = bms_add_member(joined, var_this->varattno);
+		}
+	}
+
+	foreach(lc, uniquerel->indexlist)
+	{
+		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+		bool		covers = true;
+		int			i;
+
+		if (!index->unique)
+			continue;
+		if (index->indexprs != NIL)
+			continue;
+		if (index->indpred != NIL && !index->predOK)
+			continue;
+		/* Only composite keys need this; see the top of the function. */
+		if (index->nkeycolumns < 2)
+			continue;
+
+		for (i = 0; i < index->nkeycolumns; i++)
+		{
+			AttrNumber	attnum = index->indexkeys[i];
+			bool		found = false;
+			int			j;
+
+			if (attnum <= 0)
+			{
+				covers = false;
+				break;
+			}
+
+			for (j = 0; j < nkeys; j++)
+			{
+				if (keys[j].attnum != attnum)
+					continue;
+
+				/*
+				 * The equality must belong to the operator family the index
+				 * is built for, in the equality strategy, or the index's
+				 * uniqueness is not what bounds the match.
+				 */
+				if (get_op_opfamily_strategy(keys[j].opno,
+											 index->opfamily[i]) !=
+					BTEqualStrategyNumber)
+					break;
+
+				found = true;
+				break;
+			}
+
+			if (!found)
+			{
+				covers = false;
+				break;
+			}
+		}
+
+		if (covers)
+		{
+			Bitmapset  *keyattnums = NULL;
+			List	   *othervars = NIL;
+			double		nd_other;
+			ListCell   *lc3;
+			int			j;
+
+			/*
+			 * Only a key that covers the index bounds the match, so the other
+			 * side's null fractions are looked up now rather than for every
+			 * candidate join relation.  NULLs never match, so each key column
+			 * contributes its non-null fraction.
+			 */
+			for (i = 0; i < index->nkeycolumns; i++)
+			{
+				AttrNumber	attnum = index->indexkeys[i];
+				VariableStatData vardata;
+				int			k;
+
+				for (k = 0; k < nkeys; k++)
+					if (keys[k].attnum == attnum)
+						break;
+
+				examine_variable(root, (Node *) keys[k].other, 0, &vardata);
+				if (HeapTupleIsValid(vardata.statsTuple))
+				{
+					Form_pg_statistic stats =
+						(Form_pg_statistic) GETSTRUCT(vardata.statsTuple);
+
+					nullfrac *= (1.0 - stats->stanullfrac);
+				}
+				ReleaseVariableStats(vardata);
+			}
+
+			for (j = 0; j < index->nkeycolumns; j++)
+				keyattnums = bms_add_member(keyattnums, index->indexkeys[j]);
+
+			/*
+			 * Collect, once each, the clauses that involve a key column on
+			 * this side.  Their combined selectivity is what the clause list
+			 * already charged for the key; dividing it out leaves the other
+			 * clauses' contribution intact when the key estimate is
+			 * substituted.
+			 */
+			*keyclauses = NIL;
+			foreach(lc3, restrictlist)
+			{
+				RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc3);
+				OpExpr	   *cop = (OpExpr *) rinfo->clause;
+				Node	   *cfirst = (Node *) linitial(cop->args);
+				Node	   *csecond = (Node *) lsecond(cop->args);
+				AttrNumber	att = 0;
+
+				if (IsA(cfirst, Var) &&
+					bms_is_member(((Var *) cfirst)->varno, uniquerel->relids))
+					att = ((Var *) cfirst)->varattno;
+				else if (IsA(csecond, Var) &&
+						 bms_is_member(((Var *) csecond)->varno, uniquerel->relids))
+					att = ((Var *) csecond)->varattno;
+
+				if (att > 0 && bms_is_member(att, keyattnums))
+					*keyclauses = lappend(*keyclauses, rinfo);
+			}
+			bms_free(keyattnums);
+
+			for (j = 0; j < nkeys; j++)
+				othervars = lappend(othervars, keys[j].other);
+
+			/*
+			 * The row count of the other side caps the joint count whether it
+			 * is a base relation or a join: a joint distinct count can never
+			 * exceed the number of rows it describes.
+			 */
+			nd_other = join_ndistinct_of_vars(root, otherrel, othervars);
+
+			/*
+			 * A joint distinct count cannot exceed the rows it describes, and
+			 * for a parameterized path the relation's own tuple count may not
+			 * be set yet, so use the row estimate the caller has.
+			 */
+			if (other_rows > 0.0)
+				nd_other = Min(nd_other, other_rows);
+
+			bms_free(joined);
+			pfree(keys);
+			return nullfrac / Max(nd_other, uniquerel_rows);
+		}
+	}
+
+	pfree(keys);
+	bms_free(joined);
+	return -1.0;
+}
+
+/*
+ * same_base_relation
+ *		True if the two relations are aliases of the same base relation.
+ */
+static bool
+same_base_relation(PlannerInfo *root, RelOptInfo *a, RelOptInfo *b)
+{
+	RangeTblEntry *arte;
+	RangeTblEntry *brte;
+
+	if (a->reloptkind != RELOPT_BASEREL || b->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	arte = planner_rt_fetch(a->relid, root);
+	brte = planner_rt_fetch(b->relid, root);
+
+	return arte->rtekind == RTE_RELATION &&
+		brte->rtekind == RTE_RELATION &&
+		arte->relid == brte->relid;
+}
+
+/*
+ * joinrel_key_selectivity
+ *		Clause list selectivity with the unique-key estimate substituted.
+ *
+ * Tries the key on either side, since a join can be ordered either way.  When
+ * both sides are aliases of one relation, a match on the key means it is the
+ * same row, so any other equality between them holds by construction and must
+ * not filter again.  Across relations those clauses are ordinary filters, so
+ * their combined selectivity is divided out and only the key's part is
+ * replaced.
+ *
+ * Returns the selectivity, or -1.0 when no unique key covers the join columns.
+ */
+static double
+joinrel_key_selectivity(PlannerInfo *root,
+						RelOptInfo *outer_rel, RelOptInfo *inner_rel,
+						double outer_rows, double inner_rows,
+						List *restrictlist, double jselec,
+						JoinType jointype, SpecialJoinInfo *sjinfo)
+{
+	List	   *keyclauses = NIL;
+	double		uniquesel;
+	double		keyprod = 1.0;
+	ListCell   *lc;
+
+	uniquesel = joinrel_unique_key_selectivity(root, inner_rel, outer_rel,
+											   outer_rows, restrictlist,
+											   inner_rows, &keyclauses);
+	if (uniquesel < 0.0)
+		uniquesel = joinrel_unique_key_selectivity(root, outer_rel, inner_rel,
+												   inner_rows, restrictlist,
+												   outer_rows, &keyclauses);
+	if (uniquesel < 0.0)
+		return -1.0;
+
+	if (same_base_relation(root, outer_rel, inner_rel))
+		return uniquesel;
+
+	foreach(lc, keyclauses)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		keyprod *= clause_selectivity(root, (Node *) rinfo->clause, 0,
+									  jointype, sjinfo);
+	}
+
+	if (keyprod <= 0.0 || jselec <= 0.0)
+		return uniquesel;
+
+	return Min(jselec / keyprod * uniquesel, 1.0);
+}
+
+/*
  * calc_joinrel_size_estimate
  *		Workhorse for set_joinrel_size_estimates and
  *		get_parameterized_joinrel_size.
@@ -5872,6 +6331,24 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 	switch (jointype)
 	{
 		case JOIN_INNER:
+
+			/*
+			 * A join whose clauses cover a unique key produces at most one
+			 * match per row of the other side, and the per-clause product
+			 * does not know that.  Substitute the key's estimate when one
+			 * covers the clauses; otherwise the clause list estimate stands.
+			 */
+			if (fkselec == 1.0)
+			{
+				double		keyselec;
+
+				keyselec = joinrel_key_selectivity(root, outer_rel, inner_rel,
+												   outer_rows, inner_rows,
+												   restrictlist, jselec,
+												   jointype, sjinfo);
+				if (keyselec >= 0.0)
+					jselec = keyselec;
+			}
 			nrows = outer_rows * inner_rows * fkselec * jselec;
 			/* pselec not used */
 			break;
