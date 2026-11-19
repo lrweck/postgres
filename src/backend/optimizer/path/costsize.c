@@ -90,6 +90,7 @@
 #include "access/nbtree.h"
 #include "access/tsmapi.h"
 #include "catalog/pg_collation_d.h"
+#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
@@ -2318,6 +2319,17 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 			Oid			opfamily = lfirst_oid(lc2);
 
 			cmpfunc = get_opfamily_proc(opfamily, typid, typid, BTORDER_PROC);
+
+			/*
+			 * The opfamily of a polymorphic type records its comparator under
+			 * the polymorphic type, not under each of its members: an enum
+			 * column is compared by anyenum's enum_cmp().  Arrays and ranges
+			 * are left unmatched on purpose -- their cost depends on the
+			 * element or bound type, which one comparator cost cannot say.
+			 */
+			if (!OidIsValid(cmpfunc) && type_is_enum(typid))
+				cmpfunc = get_opfamily_proc(opfamily, ANYENUMOID, ANYENUMOID,
+										   BTORDER_PROC);
 			if (OidIsValid(cmpfunc))
 				break;
 		}

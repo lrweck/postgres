@@ -25,9 +25,17 @@ BEGIN
 END
 $$;
 
-CREATE TABLE sort_cost_t (t text, i int, n numeric, u uuid);
+CREATE TYPE sort_cost_e AS ENUM ('a', 'b', 'c');
+
+CREATE TABLE sort_cost_t (t text, i int, n numeric, u uuid, b bytea, j jsonb,
+                          e sort_cost_e, a inet, m macaddr, bt bit(8));
 INSERT INTO sort_cost_t
-    SELECT 'value' || lpad(g::text, 6, '0'), g, g, md5(g::text)::uuid
+    SELECT 'value' || lpad(g::text, 6, '0'), g, g, md5(g::text)::uuid,
+           decode(md5(g::text), 'hex'), jsonb_build_object('k', g),
+           (ARRAY['a', 'b', 'c'])[g % 3 + 1]::sort_cost_e,
+           ('10.0.0.' || (g % 250))::inet,
+           ('02:00:00:00:00:' || lpad(to_hex(g % 256), 2, '0'))::macaddr,
+           (g % 256)::bit(8)
       FROM generate_series(1, 2000) g;
 ANALYZE sort_cost_t;
 
@@ -103,6 +111,39 @@ SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY n') - scan)
            AS numeric_comparator_cost
   FROM sort_cost_base;
 
+-- The rest of the comparators the catalog gives a cost of their own.  The
+-- expected ratios are the procost scaled by the share of the comparison
+-- component, which is what the assertions above do for uuid and numeric.
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY e') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 1.42 AND 1.52 AS enum_cmp_cost
+  FROM sort_cost_base;
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY a') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 1.56 AND 1.68 AS network_cmp_cost
+  FROM sort_cost_base;
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY m') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 1.85 AND 1.97 AS macaddr_cmp_cost
+  FROM sort_cost_base;
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY b') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 2.00 AND 2.12 AS byteacmp_cost
+  FROM sort_cost_base;
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY bt') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 2.00 AND 2.12 AS bitcmp_cost
+  FROM sort_cost_base;
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY j') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 2.63 AND 2.75 AS jsonb_cmp_cost
+  FROM sort_cost_base;
+
 -- MergeAppend merges with the same comparators a sort uses, and was charged
 -- the flat amount before this change.
 CREATE TABLE sort_cost_p (t text) PARTITION BY RANGE (t);
@@ -133,4 +174,5 @@ RESET enable_seqscan;
 
 DROP TABLE sort_cost_p;
 DROP TABLE sort_cost_t;
+DROP TYPE sort_cost_e;
 DROP FUNCTION sort_plan_cost(text);
