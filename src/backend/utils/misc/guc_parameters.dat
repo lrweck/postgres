@@ -1041,6 +1041,13 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_skipscan', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables the planner\'s use of loose (skip) index scans for DISTINCT.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_skipscan',
+  boot_val => 'true',
+},
+
 { name => 'enable_sort', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of explicit sort steps.',
   flags => 'GUC_EXPLAIN',

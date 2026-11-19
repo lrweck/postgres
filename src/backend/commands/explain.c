@@ -1705,6 +1705,15 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										indexonlyscan->indexorderdir,
 										es);
 				ExplainScanTarget((Scan *) indexonlyscan, es);
+				if (indexonlyscan->indexskipatts > 0)
+				{
+					if (es->format == EXPLAIN_FORMAT_TEXT)
+						appendStringInfo(es->str, "\n  Skip Atts: %d",
+										 indexonlyscan->indexskipatts);
+					else
+						ExplainPropertyInteger("Skip Atts", NULL,
+											   indexonlyscan->indexskipatts, es);
+				}
 			}
 			break;
 		case T_BitmapIndexScan:

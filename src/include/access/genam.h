@@ -172,6 +172,7 @@ extern void index_rescan(IndexScanDesc scan,
 extern void index_endscan(IndexScanDesc scan);
 extern void index_markpos(IndexScanDesc scan);
 extern void index_restrpos(IndexScanDesc scan);
+extern bool index_skip_group(IndexScanDesc scan);
 extern Size index_parallelscan_estimate(Relation indexRelation,
 										int nkeys, int norderbys, Snapshot snapshot);
 extern void index_parallelscan_initialize(Relation heapRelation,

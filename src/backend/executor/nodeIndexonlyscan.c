@@ -94,6 +94,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		node->ioss_ScanDesc = scandesc;
 		Assert(node->ioss_ScanDesc->xs_want_itup);
 
+		scandesc->xs_num_skip_atts = node->ioss_NumSkipAtts;
+
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
 		 * pass the scankeys to the index AM.
@@ -104,6 +106,19 @@ IndexOnlyNext(IndexOnlyScanState *node)
 						 node->ioss_NumScanKeys,
 						 node->ioss_OrderByKeys,
 						 node->ioss_NumOrderByKeys);
+	}
+
+	/*
+	 * If the previous tuple was accepted by all quals, advance past the rest
+	 * of its DISTINCT group before fetching the next tuple.  This is deferred
+	 * to here because the previous result slot may still reference the index
+	 * AM's tuple workspace.
+	 */
+	if (node->ioss_SkipPending)
+	{
+		node->ioss_SkipPending = false;
+		if (ScanDirectionIsForward(direction))
+			(void) index_skip_group(scandesc);
 	}
 
 	/*
@@ -139,6 +154,10 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("lossy distance functions are not supported in index-only scans")));
+
+		if (node->ioss_NumSkipAtts > 0)
+			node->ioss_SkipPending = true;
+
 		return slot;
 	}
 
@@ -217,6 +236,7 @@ ExecReScanIndexOnlyScan(IndexOnlyScanState *node)
 	node->ioss_RuntimeKeysReady = true;
 
 	/* reset index scan */
+	node->ioss_SkipPending = false;
 	if (node->ioss_ScanDesc)
 		index_rescan(node->ioss_ScanDesc,
 					 node->ioss_ScanKeys, node->ioss_NumScanKeys,
@@ -369,6 +389,9 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
 	indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
+
+	indexstate->ioss_NumSkipAtts = node->indexskipatts;
+	indexstate->ioss_SkipPending = false;
 
 	/*
 	 * Miscellaneous initialization

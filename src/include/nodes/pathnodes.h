@@ -2080,6 +2080,13 @@ typedef struct IndexPath
 	List	   *indexorderbys;
 	List	   *indexorderbycols;
 	ScanDirection indexscandir;
+	/*
+	 * Loose (skip) scan: number of leading index columns that form one
+	 * DISTINCT group; 0 for an ordinary index scan.  The path must be an
+	 * index-only path over a btree index, and the executor must have no
+	 * remaining filter quals.
+	 */
+	int			indexskipatts;
 	Cost		indextotalcost;
 	Selectivity indexselectivity;
 } IndexPath;

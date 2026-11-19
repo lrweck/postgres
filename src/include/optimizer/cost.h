@@ -52,6 +52,7 @@ extern PGDLLIMPORT int max_parallel_workers_per_gather;
 extern PGDLLIMPORT bool enable_seqscan;
 extern PGDLLIMPORT bool enable_indexscan;
 extern PGDLLIMPORT bool enable_indexonlyscan;
+extern PGDLLIMPORT bool enable_skipscan;
 extern PGDLLIMPORT bool enable_bitmapscan;
 extern PGDLLIMPORT bool enable_tidscan;
 extern PGDLLIMPORT bool enable_sort;
@@ -82,6 +83,8 @@ extern void cost_samplescan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 							ParamPathInfo *param_info);
 extern void cost_index(IndexPath *path, PlannerInfo *root,
 					   double loop_count, bool partial_path);
+extern void cost_skipscan_index(IndexPath *path, PlannerInfo *root,
+								double numGroups, int nskipatts);
 extern void cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 								  ParamPathInfo *param_info,
 								  Path *bitmapqual, double loop_count);

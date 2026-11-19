@@ -1642,6 +1642,62 @@ _bt_returnitem(IndexScanDesc scan, BTScanOpaque so)
 }
 
 /*
+ *	_bt_savemark() -- materialize a same-page mark position
+ *
+ * Before we modify so->currPos, make a copy of the page data if there is a
+ * mark position that refers to the current page's items array.
+ *
+ * On entry, so->currPos must be valid.  Its buffer will be pinned, though
+ * never locked.
+ */
+static void
+_bt_savemark(IndexScanDesc scan)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	if (so->markItemIndex < 0)
+		return;
+
+	/* bump pin on current buffer for assignment to mark buffer */
+	if (BTScanPosIsPinned(so->currPos))
+		IncrBufferRefCount(so->currPos.buf);
+	memcpy(&so->markPos, &so->currPos,
+		   offsetof(BTScanPosData, items[1]) +
+		   so->currPos.lastItem * sizeof(BTScanPosItem));
+	if (so->markTuples)
+		memcpy(so->markTuples, so->currTuples,
+			   so->currPos.nextTupleOffset);
+	so->markPos.itemIndex = so->markItemIndex;
+	so->markItemIndex = -1;
+
+	/*
+	 * If we're just about to start the next primitive index scan (possible
+	 * with a scan that has arrays keys, and needs to skip to continue in the
+	 * current scan direction), moreLeft/moreRight only indicate the end of
+	 * the current primitive index scan.  They must never be taken to indicate
+	 * that the top-level index scan has ended (that would be wrong).
+	 *
+	 * We could handle this case by treating the current array keys as markPos
+	 * state.  But depending on the current array state like this would add
+	 * complexity.  Instead, we just unset markPos's copy of moreRight or
+	 * moreLeft (whichever might be affected), while making btrestrpos reset
+	 * the scan's arrays to their initial scan positions.  In effect,
+	 * btrestrpos leaves advancing the arrays up to the first _bt_readpage
+	 * call (that takes place after it has restored markPos).
+	 */
+	if (so->needPrimScan)
+	{
+		if (ScanDirectionIsForward(so->currPos.dir))
+			so->markPos.moreRight = true;
+		else
+			so->markPos.moreLeft = true;
+	}
+
+	/* mark/restore not supported by parallel scans */
+	Assert(!scan->parallel_scan);
+}
+
+/*
  *	_bt_steppage() -- Step to next page containing valid data for scan
  *
  * Wrapper on _bt_readnextpage that performs final steps for the current page.
@@ -1663,51 +1719,8 @@ _bt_steppage(IndexScanDesc scan, ScanDirection dir)
 	if (so->numKilled > 0)
 		_bt_killitems(scan);
 
-	/*
-	 * Before we modify currPos, make a copy of the page data if there was a
-	 * mark position that needs it.
-	 */
-	if (so->markItemIndex >= 0)
-	{
-		/* bump pin on current buffer for assignment to mark buffer */
-		if (BTScanPosIsPinned(so->currPos))
-			IncrBufferRefCount(so->currPos.buf);
-		memcpy(&so->markPos, &so->currPos,
-			   offsetof(BTScanPosData, items[1]) +
-			   so->currPos.lastItem * sizeof(BTScanPosItem));
-		if (so->markTuples)
-			memcpy(so->markTuples, so->currTuples,
-				   so->currPos.nextTupleOffset);
-		so->markPos.itemIndex = so->markItemIndex;
-		so->markItemIndex = -1;
-
-		/*
-		 * If we're just about to start the next primitive index scan
-		 * (possible with a scan that has arrays keys, and needs to skip to
-		 * continue in the current scan direction), moreLeft/moreRight only
-		 * indicate the end of the current primitive index scan.  They must
-		 * never be taken to indicate that the top-level index scan has ended
-		 * (that would be wrong).
-		 *
-		 * We could handle this case by treating the current array keys as
-		 * markPos state.  But depending on the current array state like this
-		 * would add complexity.  Instead, we just unset markPos's copy of
-		 * moreRight or moreLeft (whichever might be affected), while making
-		 * btrestrpos reset the scan's arrays to their initial scan positions.
-		 * In effect, btrestrpos leaves advancing the arrays up to the first
-		 * _bt_readpage call (that takes place after it has restored markPos).
-		 */
-		if (so->needPrimScan)
-		{
-			if (ScanDirectionIsForward(so->currPos.dir))
-				so->markPos.moreRight = true;
-			else
-				so->markPos.moreLeft = true;
-		}
-
-		/* mark/restore not supported by parallel scans */
-		Assert(!scan->parallel_scan);
-	}
+	/* Before we modify currPos, save a same-page mark position */
+	_bt_savemark(scan);
 
 	BTScanPosUnpinIfPinned(so->currPos);
 
@@ -1728,6 +1741,192 @@ _bt_steppage(IndexScanDesc scan, ScanDirection dir)
 		so->needPrimScan = false;
 
 	return _bt_readnextpage(scan, blkno, lastcurrblkno, dir, false);
+}
+
+/*
+ *	_bt_looseskip() -- skip the rest of the current DISTINCT group
+ *
+ * The executor calls this (via index_skip_group()) after a tuple returned by
+ * amgettuple() has been accepted by all quals and by the table AM's
+ * visibility check.  We position the scan on the last item whose first
+ * so->nskipatts index columns equal the current tuple's, so that the next
+ * amgettuple() call returns the first item of the next group.
+ *
+ * The current page is searched first; only when the group runs past it do we
+ * walk right.  Whole pages that belong to the group are skipped using only
+ * their high key, without building the per-page items array.
+ *
+ * This is only supported for index-only scans (they keep the leaf page pinned
+ * after amgettuple returns), and only for forward scans.
+ *
+ * Returns true if the scan was repositioned.
+ */
+bool
+_bt_looseskip(IndexScanDesc scan)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	Relation	rel = scan->indexRelation;
+	BTScanInsert key;
+	Page		page;
+	BTPageOpaque opaque;
+	IndexTuple	itup;
+	BlockNumber blkno;
+	int			lo,
+				hi;
+
+	if (so->nskipatts <= 0 || !BTScanPosIsValid(so->currPos))
+		return false;
+
+	/* Loose scans are only set up for index-only scans (see btrescan()) */
+	Assert(scan->xs_want_itup);
+	Assert(BTScanPosIsPinned(so->currPos));
+	Assert(so->currPos.itemIndex >= so->currPos.firstItem);
+	Assert(so->currPos.itemIndex <= so->currPos.lastItem);
+
+	/* Deal with a killed tuple before we lose track of its itemIndex */
+	if (scan->kill_prior_tuple)
+	{
+		if (so->killedItems == NULL)
+			so->killedItems = palloc_array(int, MaxTIDsPerBTreePage);
+		if (so->numKilled < MaxTIDsPerBTreePage)
+			so->killedItems[so->numKilled++] = so->currPos.itemIndex;
+		scan->kill_prior_tuple = false;
+	}
+
+	_bt_lockbuf(rel, so->currPos.buf, BT_READ);
+	page = BufferGetPage(so->currPos.buf);
+	itup = (IndexTuple) PageGetItem(page,
+									PageGetItemId(page,
+												  so->currPos.items[so->currPos.itemIndex].indexOffset));
+
+	/*
+	 * Build a comparison key from the current tuple, covering only the
+	 * group's leading columns.  _bt_compare() then tells us whether a page
+	 * tuple belongs to the same group (0 == same leading values).
+	 *
+	 * ponytail: one palloc + metapage read per group.  D is small by
+	 * construction (that is why this path was chosen); cache the key in
+	 * BTScanOpaque if that ever stops being true.
+	 */
+	key = _bt_mkscankey(rel, itup);
+	key->keysz = so->nskipatts;
+	key->scantid = NULL;
+
+	/* Find the last item of this group on the current page */
+	lo = so->currPos.itemIndex;
+	hi = so->currPos.lastItem;
+	while (lo < hi)
+	{
+		int			mid = lo + (hi - lo + 1) / 2;
+
+		if (_bt_compare(rel, key, page,
+						so->currPos.items[mid].indexOffset) == 0)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+
+	if (lo < so->currPos.lastItem || !so->currPos.moreRight)
+	{
+		so->currPos.itemIndex = lo;
+		_bt_unlockbuf(rel, so->currPos.buf);
+		pfree(key);
+		return true;
+	}
+
+	/*
+	 * The group continues past this page.  Deal with killed items and a
+	 * possible mark position before modifying currPos, as _bt_steppage()
+	 * does.  Leave the scan pointing at the last item for now, in case we
+	 * walk off the end below.
+	 */
+	so->currPos.itemIndex = lo;
+	_bt_unlockbuf(rel, so->currPos.buf);
+	if (so->numKilled > 0)
+		_bt_killitems(scan);
+	_bt_savemark(scan);
+
+	blkno = so->currPos.nextPage;
+	BTScanPosUnpinIfPinned(so->currPos);
+
+	while (blkno != P_NONE)
+	{
+		so->currPos.buf = _bt_getbuf(rel, blkno, BT_READ);
+		page = BufferGetPage(so->currPos.buf);
+		opaque = BTPageGetOpaque(page);
+
+		if (P_IGNORE(opaque))
+		{
+			blkno = opaque->btpo_next;
+			_bt_relbuf(rel, so->currPos.buf);
+			so->currPos.buf = InvalidBuffer;
+			continue;
+		}
+
+		PredicateLockPage(rel, blkno, scan->xs_snapshot);
+
+		/*
+		 * If the high key still has our group's leading values then every
+		 * tuple on this page does too (it sorts at or after the first tuple,
+		 * which is at or after the group key).  Skip the whole page without
+		 * reading any tuples.
+		 */
+		if (P_RIGHTMOST(opaque) ||
+			_bt_compare(rel, key, page, P_HIKEY) != 0)
+		{
+			/* First page of the next group (or rightmost page) */
+			so->currPos.moreLeft = true;
+			if (!_bt_readpage(scan, ForwardScanDirection,
+							  P_FIRSTDATAKEY(opaque), false))
+			{
+				/* No matching tuples: let the next _bt_next() step off */
+				so->currPos.itemIndex = so->currPos.lastItem;
+				_bt_drop_lock_and_maybe_pin(rel, so);
+				pfree(key);
+				return true;
+			}
+
+			page = BufferGetPage(so->currPos.buf);
+			lo = so->currPos.firstItem;
+			hi = so->currPos.lastItem;
+			while (lo < hi)
+			{
+				int			mid = lo + (hi - lo + 1) / 2;
+
+				if (_bt_compare(rel, key, page,
+								so->currPos.items[mid].indexOffset) == 0)
+					lo = mid;
+				else
+					hi = mid - 1;
+			}
+
+			/*
+			 * Position on the last item of the group.  If the page starts
+			 * with the next group, position just before its first item.
+			 */
+			if (_bt_compare(rel, key, page,
+							so->currPos.items[lo].indexOffset) == 0)
+				so->currPos.itemIndex = lo;
+			else
+				so->currPos.itemIndex = lo - 1;
+
+			_bt_drop_lock_and_maybe_pin(rel, so);
+			pfree(key);
+			return true;
+		}
+
+		/* Whole page is in the current group */
+		blkno = opaque->btpo_next;
+		_bt_relbuf(rel, so->currPos.buf);
+		so->currPos.buf = InvalidBuffer;
+	}
+
+	/*
+	 * Ran out of pages.  currPos still points at the current page's last
+	 * item, so the next _bt_next() call will step off and end the scan.
+	 */
+	pfree(key);
+	return true;
 }
 
 /*

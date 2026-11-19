@@ -171,6 +171,16 @@ typedef struct IndexScanDescData
 									 * further results */
 	bool		xs_recheck;		/* T means scan keys must be rechecked */
 
+	/*
+	 * Loose (skip) scan support.  xs_num_skip_atts is the number of leading
+	 * index columns that form one DISTINCT group (0 = ordinary scan).
+	 * xs_skip_group is set by index AMs that can advance past the rest of the
+	 * current group; the executor calls it once a returned tuple has been
+	 * accepted by all quals.
+	 */
+	int			xs_num_skip_atts;
+	bool		(*xs_skip_group) (struct IndexScanDescData *scan);
+
 	/* Table access method's private state (not used during bitmap scans) */
 	void	   *xs_table_opaque;
 

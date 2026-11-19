@@ -127,6 +127,8 @@ RelationGetIndexScan(Relation indexRelation, int nkeys, int norderbys)
 	scan->xs_hitupdesc = NULL;
 
 	scan->xs_getnext_slot = NULL;
+	scan->xs_num_skip_atts = 0;
+	scan->xs_skip_group = NULL;
 
 	scan->xs_name_cstring_attnums = NULL;
 	scan->xs_name_cstring_buf = NULL;

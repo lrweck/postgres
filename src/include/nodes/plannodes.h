@@ -664,6 +664,8 @@ typedef struct IndexOnlyScan
 	List	   *indextlist;
 	/* forward or backward or don't care */
 	ScanDirection indexorderdir;
+	/* loose scan: number of leading DISTINCT index columns (0 = off) */
+	int			indexskipatts;
 } IndexOnlyScan;
 
 /* ----------------

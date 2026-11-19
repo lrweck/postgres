@@ -23,6 +23,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -232,6 +233,10 @@ static RelOptInfo *create_final_distinct_paths(PlannerInfo *root,
 static List *get_useful_pathkeys_for_distinct(PlannerInfo *root,
 											  List *needed_pathkeys,
 											  List *path_pathkeys);
+static IndexPath *make_loose_distinct_path(PlannerInfo *root,
+										   RelOptInfo *input_rel,
+										   Path *path,
+										   double numDistinctRows);
 static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										PathTarget *target,
@@ -5334,6 +5339,97 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
+ * make_loose_distinct_path
+ *		Build a loose (skip) scan variant of an index-only path, or NULL.
+ *
+ * A loose scan returns one row per distinct combination of the leading index
+ * columns.  It is only equivalent to the input path (which must already be
+ * sorted by the DISTINCT pathkeys) when:
+ *	- it is a forward btree index-only scan on an unparameterized, plain rel,
+ *	- the DISTINCT expressions match a prefix of the index's key columns,
+ *	- every restriction clause is enforced exactly by the index (so there is
+ *	  no qpqual that could reject the one row we keep per group).
+ */
+static IndexPath *
+make_loose_distinct_path(PlannerInfo *root, RelOptInfo *input_rel,
+						 Path *path, double numDistinctRows)
+{
+	Query	   *parse = root->parse;
+	IndexPath  *ipath;
+	IndexPath  *skip;
+	IndexOptInfo *index;
+	int			nskip = 0;
+	ListCell   *lc;
+
+	if (!enable_skipscan || parse->hasDistinctOn)
+		return NULL;
+
+	/* Single baserel only: a skip path is not valid above a join */
+	if (!IS_SIMPLE_REL(input_rel))
+		return NULL;
+	if (!IsA(path, IndexPath) || path->parent != input_rel)
+		return NULL;
+	if (path->pathtype != T_IndexOnlyScan)
+		return NULL;
+
+	ipath = (IndexPath *) path;
+	index = ipath->indexinfo;
+
+	if (index->relam != BTREE_AM_OID || index->indpred != NIL)
+		return NULL;
+	if (ipath->indexscandir != ForwardScanDirection)
+		return NULL;
+	if (ipath->path.param_info != NULL || ipath->indexorderbys != NIL)
+		return NULL;
+
+	/* Every restriction clause must be an exact index qual (empty qpqual) */
+	foreach(lc, input_rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		bool		found = false;
+		ListCell   *lc2;
+
+		foreach(lc2, ipath->indexclauses)
+		{
+			IndexClause *iclause = lfirst_node(IndexClause, lc2);
+
+			if (iclause->rinfo != rinfo)
+				continue;
+
+			/*
+			 * Lossy index quals (e.g. those derived from LIKE) leave a
+			 * recheck qual behind; another row of the group might pass it.
+			 */
+			if (iclause->lossy)
+				return NULL;
+
+			found = true;
+			break;
+		}
+		if (!found)
+			return NULL;
+	}
+
+	if (!pathkeys_count_contained_in(root->distinct_pathkeys,
+									 ipath->path.pathkeys, &nskip))
+		return NULL;
+
+	if (nskip <= 0 || nskip > index->nkeycolumns)
+		return NULL;
+
+	/* No point when the input is already nearly unique */
+	if (numDistinctRows >= path->rows)
+		return NULL;
+
+	skip = palloc(sizeof(IndexPath));
+	memcpy(skip, ipath, sizeof(IndexPath));
+	skip->indexskipatts = nskip;
+	cost_skipscan_index(skip, root, numDistinctRows, nskip);
+
+	return skip;
+}
+
+/*
  * create_final_distinct_paths
  *		Create distinct paths in 'distinct_rel' based on 'input_rel' pathlist
  *
@@ -5429,6 +5525,28 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 				if (sorted_path == NULL)
 					continue;
+
+				/*
+				 * If the input path is already sorted by the DISTINCT keys,
+				 * also consider a loose (skip) scan of the same index: it
+				 * returns only the first row of each group of duplicate keys.
+				 * This only fires for a plain DISTINCT on a single baserel.
+				 */
+				if (sorted_path == input_path &&
+					root->distinct_pathkeys != NIL)
+				{
+					IndexPath  *skip_path;
+
+					skip_path = make_loose_distinct_path(root, input_rel,
+														 sorted_path,
+														 numDistinctRows);
+					if (skip_path != NULL)
+						add_path(distinct_rel, (Path *)
+								 create_unique_path(root, distinct_rel,
+													(Path *) skip_path,
+													list_length(needed_pathkeys),
+													numDistinctRows));
+				}
 
 				/*
 				 * distinct_pathkeys may have become empty if all of the
