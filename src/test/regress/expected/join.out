@@ -13319,3 +13319,142 @@ WHERE s.x = s.c;
 (1 row)
 
 ROLLBACK;
+-- check_join_est_rows() mirrors the helper in stats_ext, which cannot be reused
+-- here because regression tests share one database.
+CREATE FUNCTION check_join_est_rows(text) RETURNS TABLE (estimated int, actual int)
+LANGUAGE plpgsql AS
+$$
+DECLARE
+    ln text;
+    tmp text[];
+    first_row bool := true;
+BEGIN
+    FOR ln IN EXECUTE format('EXPLAIN ANALYZE %s', $1) LOOP
+        IF first_row THEN
+            first_row := false;
+            tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+            RETURN QUERY SELECT tmp[1]::int, tmp[2]::int;
+        END IF;
+    END LOOP;
+END;
+$$;
+-- Inequality joins use both sides' distributions instead of a fixed 1/3.
+CREATE TABLE join_est_lo (x int);
+CREATE TABLE join_est_hi (y int);
+INSERT INTO join_est_lo SELECT i FROM generate_series(1, 100) i;
+INSERT INTO join_est_hi SELECT i FROM generate_series(1000, 1100) i;
+ANALYZE join_est_lo;
+ANALYZE join_est_hi;
+-- ranges do not overlap: nothing matches, where a constant would say 1/3 do
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_hi h JOIN join_est_lo l ON h.y < l.x
+$$);
+ estimated | actual 
+-----------+--------
+         1 |      0
+(1 row)
+
+-- and the opposite: every pair matches
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_lo l JOIN join_est_hi h ON l.x < h.y
+$$);
+ estimated | actual 
+-----------+--------
+     10099 |  10100
+(1 row)
+
+
+-- A column whose MCV list holds every value and leaves no histogram: its
+-- frequencies are stored rounded, and the residue must not send the estimate
+-- back to the constant.
+CREATE TABLE join_est_mcv (y int);
+INSERT INTO join_est_mcv SELECT i % 20 FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_hist (x int);
+INSERT INTO join_est_hist SELECT i % 1000 FROM generate_series(1, 5000) i;
+ANALYZE join_est_mcv;
+ANALYZE join_est_hist;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_hist h JOIN join_est_mcv m ON h.x < m.y
+$$);
+ estimated | actual 
+-----------+--------
+     47950 |  47500
+(1 row)
+
+DROP TABLE join_est_hist, join_est_mcv;
+
+-- A side whose statistics do not describe its distribution keeps the constant
+-- rather than inventing a distribution from nothing.  The row count is known
+-- here, so only the join selectivity falls back.
+CREATE TABLE join_est_no (x int);
+INSERT INTO join_est_no SELECT i FROM generate_series(1, 100) i;
+ALTER TABLE join_est_no ALTER COLUMN x SET STATISTICS 0;
+ANALYZE join_est_no;
+CREATE TABLE join_est_yes (y int);
+INSERT INTO join_est_yes SELECT i FROM generate_series(1, 100) i;
+ANALYZE join_est_yes;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_no n JOIN join_est_yes y ON n.x < y.y
+$$);
+ estimated | actual 
+-----------+--------
+      3333 |   4950
+(1 row)
+
+DROP TABLE join_est_no, join_est_yes;
+-- A comparison between two types is not given a distribution either.
+CREATE TABLE join_est_big (y bigint);
+INSERT INTO join_est_big SELECT i FROM generate_series(1, 100) i;
+ANALYZE join_est_big;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_lo l JOIN join_est_big b ON l.x < b.y
+$$);
+ estimated | actual 
+-----------+--------
+      3333 |   4950
+(1 row)
+
+DROP TABLE join_est_big;
+-- The inclusive operators use the same distributions as the strict ones.
+CREATE TABLE join_est_ov (x int);
+CREATE TABLE join_est_ov2 (y int);
+INSERT INTO join_est_ov SELECT i FROM generate_series(1, 100) i;
+INSERT INTO join_est_ov2 SELECT i FROM generate_series(1, 100) i;
+ANALYZE join_est_ov;
+ANALYZE join_est_ov2;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ov a JOIN join_est_ov2 b ON a.x <= b.y
+$$);
+ estimated | actual 
+-----------+--------
+      5000 |   5050
+(1 row)
+
+-- A few distinct values put the whole column in the MCV list and leave no
+-- histogram; the distribution is still fully known.
+CREATE TABLE join_est_few (x int);
+INSERT INTO join_est_few SELECT (i % 5) * 10 FROM generate_series(1, 1000) i;
+ANALYZE join_est_few;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ov a JOIN join_est_few f ON f.x <= a.x
+$$);
+ estimated | actual 
+-----------+--------
+     81010 |  80800
+(1 row)
+
+-- NULLs match nothing, and both sides' null fraction is charged once.
+CREATE TABLE join_est_lnull (x int);
+INSERT INTO join_est_lnull SELECT CASE WHEN i % 2 = 0 THEN NULL ELSE i END
+                        FROM generate_series(1, 200) i;
+ANALYZE join_est_lnull;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ov a JOIN join_est_lnull n ON n.x <= a.x
+$$);
+ estimated | actual 
+-----------+--------
+      2501 |   2550
+(1 row)
+
+DROP TABLE join_est_ov, join_est_ov2, join_est_few, join_est_lnull;
+DROP TABLE join_est_lo, join_est_hi;
