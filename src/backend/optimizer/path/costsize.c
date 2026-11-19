@@ -2280,7 +2280,7 @@ sort_provider_cost_factor(Oid collid)
  * and adjusted without touching the planner.
  *
  * The comparator is scaled so that a procost of 1.0 reproduces today's flat
- * charge exactly; a type measured at 2.15x its reference needs procost 2.15.
+ * charge exactly; a type measured at twice its reference needs procost 2.0.
  * Returns 0.0 when the ordering operator cannot be identified.
  */
 Cost
@@ -2328,13 +2328,11 @@ sort_comparison_cost(PlannerInfo *root, List *pathkeys)
 		 * add_function_cost() reads pg_proc.procost and gives a prosupport
 		 * function the chance to do better, so a type can express its own
 		 * comparison cost without this file knowing anything about it.
-		 *
 		 * procost is expressed in cpu_operator_cost units and the flat charge
 		 * is two of those units, so scaling by two keeps a procost of 1.0 a
 		 * no-op: a system whose comparators are all at the default is
 		 * unaffected.
-		 */
-		/*
+		 *
 		 * Pass the sort key expression, not NULL: a prosupport cost function
 		 * cannot estimate the cost of comparing text without seeing the
 		 * collation and typmod.  The same comparison costs 1.5x to 1.9x more
@@ -2719,7 +2717,7 @@ cost_merge_append(Path *path, PlannerInfo *root,
 
 	/*
 	 * Assumed cost per tuple comparison.  The heap merge compares with the
-	 * same btree ordering comparators a sort uses, so it pays the same extra
+	 * same ordering comparators a sort uses, so it pays the same extra
 	 * per-comparison cost.
 	 */
 	comparison_cost = 2.0 * cpu_operator_cost +
