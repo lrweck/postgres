@@ -1927,8 +1927,9 @@ cost_recursive_union(Path *runion, Path *nrterm, Path *rterm)
  * total, but we will also need to write and read each tuple once per
  * merge pass.  We expect about ceil(logM(r)) merge passes where r is the
  * number of initial runs formed and M is the merge order used by tuplesort.c.
- * Since the average initial run should be about sort_mem, we have
- *		disk traffic = 2 * relsize * ceil(logM(p / sort_mem))
+ * The number of runs follows from the in-memory footprint (see
+ * tuplesort_run_count()), so we have
+ *		disk traffic = 2 * relsize * ceil(logM(r))
  *		cpu = comparison_cost * t * log2(t)
  *
  * If the sort is bounded (i.e., only the first k result tuples are needed)
@@ -1988,7 +1989,15 @@ cost_tuplesort(Cost *startup_cost, Cost *run_cost,
 		 * We'll have to use a disk-based sort of all the tuples
 		 */
 		double		npages = ceil(input_bytes / BLCKSZ);
-		double		nruns = input_bytes / sort_mem_bytes;
+		/*
+		 * The number of runs follows from the in-memory footprint, not from
+		 * the data volume alone: run generation also holds one SortTuple per
+		 * tuple, which is why dividing the data volume by sort_mem
+		 * underestimates the run count and, at a run-count boundary, the
+		 * merge passes.
+		 */
+		double		nruns = tuplesort_run_count(tuples, input_bytes,
+												sort_mem_bytes);
 		double		mergeorder = tuplesort_merge_order(sort_mem_bytes);
 		double		log_runs;
 		double		npageaccesses;
