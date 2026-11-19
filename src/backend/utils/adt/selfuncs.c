@@ -3256,12 +3256,236 @@ neqjoinsel(PG_FUNCTION_ARGS)
 }
 
 /*
+ * has_usable_distribution
+ *		True if scalarineqsel() can answer for this variable without falling
+ *		back on DEFAULT_INEQ_SEL.
+ *
+ * That is the case when the column has a histogram, or when its MCV list
+ * accounts for every non-null row, which is how a low-cardinality column is
+ * stored: ANALYZE keeps all the values in the MCV list and builds no histogram.
+ */
+static bool
+has_usable_distribution(VariableStatData *vardata)
+{
+	AttStatsSlot slot;
+	Form_pg_statistic stats;
+	double		sumcommon = 0.0;
+	int			i;
+
+	if (!HeapTupleIsValid(vardata->statsTuple))
+		return false;
+
+	if (get_attstatsslot(&slot, vardata->statsTuple,
+						 STATISTIC_KIND_HISTOGRAM, InvalidOid,
+						 ATTSTATSSLOT_VALUES))
+	{
+		bool		ok = (slot.nvalues >= 2);
+
+		free_attstatsslot(&slot);
+		if (ok)
+			return true;
+	}
+
+	/* Request the values too: nvalues is what counts the entries. */
+	if (get_attstatsslot(&slot, vardata->statsTuple,
+						 STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+	{
+		for (i = 0; i < slot.nvalues; i++)
+			sumcommon += slot.numbers[i];
+		free_attstatsslot(&slot);
+	}
+
+	stats = (Form_pg_statistic) GETSTRUCT(vardata->statsTuple);
+	return sumcommon >= 1.0 - stats->stanullfrac - 1e-6;
+}
+
+/*
+ * ineq_join_histogram_selectivity
+ *		Estimate P(left OP right) from the histograms and MCV lists of both
+ *		sides.
+ *
+ * For each value the right side can take, the fraction of the left side that
+ * satisfies the operator is exactly what scalarineqsel() computes for a
+ * constant of that value.  Weighting those fractions by the right side's own
+ * distribution turns a join into an average over its right input, which is why
+ * both MCV lists and both histograms participate: the left side through
+ * scalarineqsel(), the right side by being the distribution we average over.
+ *
+ * The right side's histogram buckets are represented by their bounds, and a
+ * bucket is charged the mean of the fractions at its two bounds.  That is
+ * exact for a value-uniform bucket and is the same assumption the histogram
+ * already makes elsewhere.
+ *
+ * The right side needs either a histogram or an MCV list that accounts for all
+ * of its rows, which is how a low-cardinality column is stored.  The left side
+ * is queried through scalarineqsel(), which is why has_usable_distribution()
+ * must hold for it as well.
+ *
+ * Returns -1 when the statistics cannot describe one of the sides well enough
+ * to beat DEFAULT_INEQ_SEL, which is the caller's signal to use that constant.
+ */
+static Selectivity
+ineq_join_histogram_selectivity(PlannerInfo *root, Oid operator,
+								bool isgt, bool iseq, Oid collation,
+								VariableStatData *vardata_left,
+								VariableStatData *vardata_right,
+								Oid righttype)
+{
+	AttStatsSlot hslot;
+	AttStatsSlot mslot;
+	Form_pg_statistic stats;
+	double		nullfrac;
+	double		rest;
+	double		result = 0.0;
+	int			i;
+
+	if (!HeapTupleIsValid(vardata_right->statsTuple) ||
+		!HeapTupleIsValid(vardata_left->statsTuple))
+		return -1.0;
+
+	/*
+	 * The left side is queried through scalarineqsel(), which falls back on
+	 * DEFAULT_INEQ_SEL for whatever its MCV list does not cover unless it
+	 * also has a histogram.  Bail out here rather than blend that constant
+	 * into the average and call it a measurement.
+	 */
+	if (!has_usable_distribution(vardata_left))
+		return -1.0;
+
+	/*
+	 * A histogram is optional here: a low-cardinality column keeps every
+	 * value in the MCV list and has no histogram at all, and if the MCVs
+	 * account for the whole column there is nothing left to distribute.  What
+	 * is required is that every remaining row can be placed somewhere.
+	 */
+	if (!get_attstatsslot(&hslot, vardata_right->statsTuple,
+						  STATISTIC_KIND_HISTOGRAM, InvalidOid,
+						  ATTSTATSSLOT_VALUES))
+		hslot.nvalues = 0;
+	else if (hslot.nvalues < 2)
+	{
+		free_attstatsslot(&hslot);
+		hslot.nvalues = 0;
+	}
+
+	stats = (Form_pg_statistic) GETSTRUCT(vardata_right->statsTuple);
+	nullfrac = stats->stanullfrac;
+
+	/* MCV part: each value gets its own exact fraction on the left side. */
+	rest = 1.0 - nullfrac;
+	if (get_attstatsslot(&mslot, vardata_right->statsTuple,
+						 STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+	{
+		for (i = 0; i < mslot.nvalues; i++)
+		{
+			Selectivity frac;
+
+			frac = scalarineqsel(root, operator, isgt, iseq, collation,
+								 vardata_left, mslot.values[i], righttype);
+			result += mslot.numbers[i] * frac;
+			rest -= mslot.numbers[i];
+		}
+		free_attstatsslot(&mslot);
+	}
+
+	/*
+	 * Whatever the MCV list did not account for must be placed by a
+	 * histogram; without one there is no way to know where those rows are.
+	 */
+	if (rest > 0.0 && hslot.nvalues < 2)
+	{
+		free_attstatsslot(&hslot);
+		return -1.0;
+	}
+
+	/*
+	 * Histogram part: the remaining mass spread over the buckets, each bucket
+	 * represented by the mean of the fractions at its two bounds.
+	 */
+	if (rest > 0.0)
+	{
+		double		per_bucket = rest / (hslot.nvalues - 1);
+		Selectivity lo;
+
+		lo = scalarineqsel(root, operator, isgt, iseq, collation,
+						   vardata_left, hslot.values[0], righttype);
+		for (i = 0; i < hslot.nvalues - 1; i++)
+		{
+			Selectivity hi;
+
+			hi = scalarineqsel(root, operator, isgt, iseq, collation,
+							   vardata_left, hslot.values[i + 1], righttype);
+			result += per_bucket * (lo + hi) / 2.0;
+			lo = hi;
+		}
+	}
+
+	free_attstatsslot(&hslot);
+
+	/*
+	 * Both 0 and 1 are legitimate answers: disjoint ranges never match, and a
+	 * side whose range lies entirely below the other always does.  Only the
+	 * absence of statistics is a reason to fall back.
+	 */
+	if (result < 0.0)
+		result = 0.0;
+	if (result > 1.0)
+		result = 1.0;
+
+	return result;
+}
+
+/*
+ * scalar_ineq_joinsel
+ *		Common code for scalarltjoinsel and friends.
+ *
+ * Only same-type comparisons are considered; a cross-type operator keeps
+ * DEFAULT_INEQ_SEL.  So does a join whose statistics cannot describe one of the
+ * sides well enough to beat that constant.
+ */
+static Selectivity
+scalar_ineq_joinsel(FunctionCallInfo fcinfo, bool isgt, bool iseq)
+{
+	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
+	Oid			operator = PG_GETARG_OID(1);
+	List	   *args = (List *) PG_GETARG_POINTER(2);
+	Node	   *left = (Node *) linitial(args);
+	Node	   *right = (Node *) lsecond(args);
+	VariableStatData vardata_left;
+	VariableStatData vardata_right;
+	Selectivity result = -1.0;
+	Oid			collation = PG_GET_COLLATION();
+
+	/* Only same-type comparisons can be averaged over the other histogram. */
+	if (exprType(left) != exprType(right))
+		return DEFAULT_INEQ_SEL;
+
+	examine_variable(root, left, 0, &vardata_left);
+	examine_variable(root, right, 0, &vardata_right);
+
+	result = ineq_join_histogram_selectivity(root, operator, isgt, iseq,
+											 collation,
+											 &vardata_left, &vardata_right,
+											 exprType(right));
+
+	ReleaseVariableStats(vardata_left);
+	ReleaseVariableStats(vardata_right);
+
+	if (result < 0.0)
+		return DEFAULT_INEQ_SEL;
+
+	return result;
+}
+
+/*
  *		scalarltjoinsel - Join selectivity of "<" for scalars
  */
 Datum
 scalarltjoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, false, false));
 }
 
 /*
@@ -3270,7 +3494,7 @@ scalarltjoinsel(PG_FUNCTION_ARGS)
 Datum
 scalarlejoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, false, true));
 }
 
 /*
@@ -3279,7 +3503,7 @@ scalarlejoinsel(PG_FUNCTION_ARGS)
 Datum
 scalargtjoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, true, false));
 }
 
 /*
@@ -3288,7 +3512,7 @@ scalargtjoinsel(PG_FUNCTION_ARGS)
 Datum
 scalargejoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, true, true));
 }
 
 
