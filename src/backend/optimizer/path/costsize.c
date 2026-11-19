@@ -4342,6 +4342,9 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	double		inner_path_rows = inner_path->rows;
 	double		inner_path_rows_total = inner_path_rows;
 	int			num_hashclauses = list_length(hashclauses);
+	double		hash_op_cost = cpu_operator_cost * num_hashclauses;
+	double		inner_hash_cost;
+	double		outer_hash_cost;
 	int			numbuckets;
 	int			numbatches;
 	int			num_skew_mcvs;
@@ -4371,9 +4374,10 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	 * should charge the extra eval costs of the left or right side, as
 	 * appropriate, here.  This seems more work than it's worth at the moment.
 	 */
-	startup_cost += (cpu_operator_cost * num_hashclauses + cpu_tuple_cost)
-		* inner_path_rows;
-	run_cost += cpu_operator_cost * num_hashclauses * outer_path_rows;
+	inner_hash_cost = (hash_op_cost + cpu_tuple_cost) * inner_path_rows;
+	outer_hash_cost = hash_op_cost * outer_path_rows;
+	startup_cost += inner_hash_cost;
+	run_cost += outer_hash_cost;
 
 	/*
 	 * If this is a parallel hash build, then the value we have for
@@ -4410,6 +4414,13 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	 * time.  Charge seq_page_cost per page, since the I/O should be nice and
 	 * sequential.  Writing the inner rel counts as startup cost, all the rest
 	 * as run cost.
+	 *
+	 * Only the batches that do not fit in memory are written out and read
+	 * back: batch 0 is built and probed in place.  With b batches that is
+	 * (b - 1) / b of each relation, which is what the executor reports in
+	 * "Temp Written Blocks" -- at two batches it writes half of the relation,
+	 * not all of it.  Charging every page overprices the common case by the
+	 * batch count.
 	 */
 	if (numbatches > 1)
 	{
@@ -4417,9 +4428,10 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 										   outer_path->pathtarget->width);
 		double		innerpages = page_size(inner_path_rows,
 										   inner_path->pathtarget->width);
+		double		spilled = (double) (numbatches - 1) / numbatches;
 
-		startup_cost += seq_page_cost * innerpages;
-		run_cost += seq_page_cost * (innerpages + 2 * outerpages);
+		startup_cost += seq_page_cost * innerpages * spilled;
+		run_cost += seq_page_cost * (innerpages + 2 * outerpages) * spilled;
 	}
 
 	/* CPU costs left for later */
