@@ -481,9 +481,24 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 												flags);
 			break;
 		case T_Unique:
-			plan = (Plan *) create_unique_plan(root,
-											   (UniquePath *) best_path,
-											   flags);
+			{
+				UniquePath *upath = (UniquePath *) best_path;
+
+				/*
+				 * A loose scan already returns one row per DISTINCT group, so
+				 * the Unique node would be a no-op.  Elide it instead of
+				 * paying a comparison per group.
+				 */
+				if (IsA(upath->subpath, IndexPath) &&
+					((IndexPath *) upath->subpath)->indexskipatts > 0)
+				{
+					plan = create_plan_recurse(root, upath->subpath,
+											   flags | CP_LABEL_TLIST);
+					break;
+				}
+
+				plan = (Plan *) create_unique_plan(root, upath, flags);
+			}
 			break;
 		case T_Gather:
 			plan = (Plan *) create_gather_plan(root,
