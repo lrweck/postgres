@@ -616,6 +616,9 @@ typedef struct IndexScan
 	List	   *indexorderbyops;
 	/* forward or backward or don't care */
 	ScanDirection indexorderdir;
+	/* loose scan: number of leading index columns (0 = off) */
+	int			indexskipatts;
+	bool		indexskipdescend;	/* skip by re-descending the tree */
 } IndexScan;
 
 /* ----------------

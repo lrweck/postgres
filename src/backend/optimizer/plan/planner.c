@@ -237,7 +237,8 @@ static IndexPath *make_loose_scan_path(PlannerInfo *root,
 									   RelOptInfo *input_rel,
 									   Path *path,
 									   List *loosepathkeys,
-									   double numGroups);
+									   double numGroups,
+									   List *required_pathkeys);
 static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										PathTarget *target,
@@ -5340,14 +5341,74 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
+ * loose_leading_equalities
+ *		Count leading index key columns fixed to a single value by an exact
+ *		equality index qual.
+ *
+ * Those columns are constant for the whole scan, so grouping can start at the
+ * next column: with index (a,b), "WHERE a = 1 ... DISTINCT b" groups by b.
+ * ScalarArrayOp ("= ANY") keys are deliberately not counted: they drive
+ * multiple primitive scans, and the loose scan currently only re-descends for
+ * plain scans.
+ */
+static int
+loose_leading_equalities(IndexPath *path)
+{
+	IndexOptInfo *index = path->indexinfo;
+	int			k = 0;
+	int			col;
+	for (col = 0; col < index->nkeycolumns; col++)
+	{
+		bool		found = false;
+		ListCell   *lc;
+
+		foreach(lc, path->indexclauses)
+		{
+			IndexClause *iclause = lfirst_node(IndexClause, lc);
+			RestrictInfo *iqrinfo;
+			OpExpr	   *op;
+
+			if (iclause->indexcol != col || iclause->lossy)
+				continue;
+			if (list_length(iclause->indexquals) != 1)
+				continue;
+
+			/* IndexClause.indexquals holds RestrictInfos in this tree */
+			iqrinfo = linitial_node(RestrictInfo, iclause->indexquals);
+			if (!IsA(iqrinfo->clause, OpExpr))
+				continue;
+
+			op = (OpExpr *) iqrinfo->clause;
+			if (get_op_opfamily_strategy(op->opno,
+										 index->opfamily[col]) !=
+				BTEqualStrategyNumber)
+				continue;
+
+			found = true;
+			break;
+		}
+
+		if (!found)
+			break;
+		k++;
+	}
+
+	return k;
+}
+
+/*
  * make_loose_scan_path
  *		Build a loose (skip) scan variant of an index-only path, or NULL.
  *
- * A loose scan returns one row per distinct combination of the leading index
- * columns.  It is only equivalent to the input path (which must already be
- * sorted by loosepathkeys) when:
+ * A loose scan returns one row per group.  With k leading key columns fixed by
+ * equality quals, the group is the next n key columns, and loosepathkeys must
+ * match those (so the scan is effectively ordered by them inside the fixed
+ * range).  The AM compares the first k+n columns, which is harmless because
+ * the first k are constant.
+ *
+ * It is only usable when:
  *	- it is a forward btree index-only scan on an unparameterized, plain rel,
- *	- loosepathkeys match a prefix of the index's key columns,
+ *	- loosepathkeys match the index key columns after the fixed prefix,
  *	- every restriction clause is enforced exactly by the index (so there is
  *	  no qpqual that could reject the one row we keep per group).
  *
@@ -5356,11 +5417,13 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
  */
 static IndexPath *
 make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
-					 List *loosepathkeys, double numGroups)
+					 List *loosepathkeys, double numGroups,
+					 List *required_pathkeys)
 {
 	IndexPath  *ipath;
 	IndexPath  *skip;
 	IndexOptInfo *index;
+	int			k;
 	int			nskip = 0;
 	ListCell   *lc;
 
@@ -5372,7 +5435,7 @@ make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 		return NULL;
 	if (!IsA(path, IndexPath) || path->parent != input_rel)
 		return NULL;
-	if (path->pathtype != T_IndexOnlyScan)
+	if (path->pathtype != T_IndexOnlyScan && path->pathtype != T_IndexScan)
 		return NULL;
 
 	ipath = (IndexPath *) path;
@@ -5413,11 +5476,30 @@ make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 			return NULL;
 	}
 
-	if (!pathkeys_count_contained_in(loosepathkeys,
-									 ipath->path.pathkeys, &nskip))
+	/*
+	 * Leading key columns fixed by equality quals are constant, so they are
+	 * dropped from the path's pathkeys by build_index_pathkeys().  The group
+	 * therefore starts at key column k+1, while path->pathkeys still starts
+	 * with the first non-constant ordering column.  Comparing k+n leading
+	 * columns is harmless: the first k are equal for every tuple in range.
+	 */
+	k = loose_leading_equalities(ipath);
+	if (k >= index->nkeycolumns)
 		return NULL;
 
-	if (nskip <= 0 || nskip > index->nkeycolumns)
+	if (!pathkeys_count_contained_in(loosepathkeys, ipath->path.pathkeys,
+									 &nskip))
+		return NULL;
+
+	if (nskip <= 0 || k + nskip > index->nkeycolumns)
+		return NULL;
+
+	/*
+	 * The scan is effectively ordered by path->pathkeys, so it must also
+	 * satisfy whatever order the caller needs (the DISTINCT ON / GROUP BY
+	 * order, which can be longer than the group keys).
+	 */
+	if (!pathkeys_contained_in(required_pathkeys, ipath->path.pathkeys))
 		return NULL;
 
 	/* No point when the input is already nearly unique */
@@ -5426,8 +5508,8 @@ make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 
 	skip = palloc(sizeof(IndexPath));
 	memcpy(skip, ipath, sizeof(IndexPath));
-	skip->indexskipatts = nskip;
-	cost_skipscan_index(skip, root, numGroups, nskip,
+	skip->indexskipatts = k + nskip;
+	cost_skipscan_index(skip, root, numGroups, k + nskip,
 						&skip->indexskipdescend);
 
 	return skip;
@@ -5506,6 +5588,31 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		else
 			needed_pathkeys = root->distinct_pathkeys;
 
+		/*
+		 * Loose-scan candidates live outside input_rel->pathlist (see
+		 * build_index_paths), because add_path() may discard an index's own
+		 * forward path in favor of a same-ordering path on another index.
+		 */
+		if (root->distinct_pathkeys != NIL)
+		{
+			foreach(lc, input_rel->loose_pathlist)
+			{
+				Path	   *loose_input = (Path *) lfirst(lc);
+				IndexPath  *skip_path;
+
+				skip_path = make_loose_scan_path(root, input_rel, loose_input,
+												 root->distinct_pathkeys,
+												 numDistinctRows,
+												 needed_pathkeys);
+				if (skip_path != NULL)
+					add_path(distinct_rel, (Path *)
+							 create_unique_path(root, distinct_rel,
+												(Path *) skip_path,
+												list_length(root->distinct_pathkeys),
+												numDistinctRows));
+			}
+		}
+
 		foreach(lc, input_rel->pathlist)
 		{
 			Path	   *input_path = (Path *) lfirst(lc);
@@ -5529,29 +5636,6 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 				if (sorted_path == NULL)
 					continue;
-
-				/*
-				 * If the input path is already sorted by the DISTINCT keys,
-				 * also consider a loose (skip) scan of the same index: it
-				 * returns only the first row of each group of duplicate keys.
-				 * This only fires for a plain DISTINCT on a single baserel.
-				 */
-				if (sorted_path == input_path &&
-					root->distinct_pathkeys != NIL)
-				{
-					IndexPath  *skip_path;
-
-					skip_path = make_loose_scan_path(root, input_rel,
-													 sorted_path,
-													 root->distinct_pathkeys,
-													 numDistinctRows);
-					if (skip_path != NULL)
-						add_path(distinct_rel, (Path *)
-								 create_unique_path(root, distinct_rel,
-													(Path *) skip_path,
-													list_length(root->distinct_pathkeys),
-													numDistinctRows));
-				}
 
 				/*
 				 * distinct_pathkeys may have become empty if all of the
@@ -7547,6 +7631,43 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 	if (can_sort)
 	{
 		/*
+		 * Loose-scan candidates, one forward path per index (see
+		 * build_index_paths).  For GROUP BY this may group by the columns
+		 * after an equality-fixed prefix.
+		 */
+		if (parse->groupClause != NIL && root->group_pathkeys != NIL)
+		{
+			ListCell   *lcl;
+
+			foreach(lcl, input_rel->loose_pathlist)
+			{
+				Path	   *loose_input = (Path *) lfirst(lcl);
+				List	   *orderings;
+				ListCell   *lco;
+
+				orderings = get_useful_group_keys_orderings(root, loose_input);
+				foreach(lco, orderings)
+				{
+					GroupByOrdering *info = (GroupByOrdering *) lfirst(lco);
+					IndexPath  *loose_path;
+
+					loose_path = make_loose_scan_path(root, input_rel,
+													  loose_input,
+													  root->group_pathkeys,
+													  dNumGroups,
+													  info->pathkeys);
+					if (loose_path != NULL)
+						add_path(grouped_rel, (Path *)
+								 create_group_path(root, grouped_rel,
+												   (Path *) loose_path,
+												   info->clauses,
+												   havingQual,
+												   dNumGroups));
+				}
+			}
+		}
+
+		/*
 		 * Use any available suitably-sorted path as input, and also consider
 		 * sorting the cheapest-total path and incremental sort on any paths
 		 * with presorted keys.
@@ -7606,32 +7727,15 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 				}
 				else if (parse->groupClause)
 				{
-					Path	   *group_input = path;
-
 					/*
 					 * We have GROUP BY without aggregation or grouping sets.
-					 * This is DISTINCT on the grouping columns: if the input
-					 * is already sorted by them, try a loose scan.  The Group
-					 * node above it is then a no-op and create_plan() elides
-					 * it.  HAVING can reject groups, so keep the Group node in
-					 * that case (by simply not building a loose path).
+					 * Make a GroupPath.  (Loose-scan variants were added
+					 * above.)
 					 */
-					if (path == path_save && havingQual == NIL)
-					{
-						IndexPath  *loose_path;
-
-						loose_path = make_loose_scan_path(root, input_rel,
-														  path,
-														  root->group_pathkeys,
-														  dNumGroups);
-						if (loose_path != NULL)
-							group_input = (Path *) loose_path;
-					}
-
 					add_path(grouped_rel, (Path *)
 							 create_group_path(root,
 											   grouped_rel,
-											   group_input,
+											   path,
 											   info->clauses,
 											   havingQual,
 											   dNumGroups));

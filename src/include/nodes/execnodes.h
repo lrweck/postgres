@@ -1748,6 +1748,9 @@ typedef struct IndexScanState
 	struct IndexScanDescData *iss_ScanDesc;
 	IndexScanInstrumentation *iss_Instrument;
 	SharedIndexScanInstrumentation *iss_SharedInfo;
+	int			iss_NumSkipAtts;	/* loose scan: leading index columns */
+	bool		iss_SkipDescend;	/* skip by re-descending the tree */
+	bool		iss_SkipPending;	/* skip the previous tuple's group next time */
 
 	/* These are needed for re-checking ORDER BY expr ordering */
 	pairingheap *iss_ReorderQueue;

@@ -1695,6 +1695,22 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										indexscan->indexorderdir,
 										es);
 				ExplainScanTarget((Scan *) indexscan, es);
+				if (indexscan->indexskipatts > 0)
+				{
+					if (es->format == EXPLAIN_FORMAT_TEXT)
+						appendStringInfo(es->str, "\n  Skip Atts: %d (%s)",
+										 indexscan->indexskipatts,
+										 indexscan->indexskipdescend ?
+										 "descend" : "walk");
+					else
+					{
+						ExplainPropertyInteger("Skip Atts", NULL,
+											   indexscan->indexskipatts, es);
+						ExplainPropertyText("Skip Mode",
+											indexscan->indexskipdescend ?
+											"descend" : "walk", es);
+					}
+				}
 			}
 			break;
 		case T_IndexOnlyScan:

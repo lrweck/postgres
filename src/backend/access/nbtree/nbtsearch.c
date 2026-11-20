@@ -1778,8 +1778,7 @@ _bt_looseskip(IndexScanDesc scan)
 	if (so->nskipatts <= 0 || !BTScanPosIsValid(so->currPos))
 		return false;
 
-	/* Loose scans are only set up for index-only scans (see btrescan()) */
-	Assert(scan->xs_want_itup);
+	/* btrescan() keeps the leaf page pinned when a loose scan is requested */
 	Assert(BTScanPosIsPinned(so->currPos));
 	Assert(so->currPos.itemIndex >= so->currPos.firstItem);
 	Assert(so->currPos.itemIndex <= so->currPos.lastItem);

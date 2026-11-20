@@ -896,6 +896,14 @@ cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
 	*descend = (descend_cost < walk_cost);
 	run_cost = *descend ? descend_cost : walk_cost;
 
+	/*
+	 * A plain index scan fetches a heap tuple per group, unlike an index-only
+	 * scan.  Charge one random heap page per group; a loose scan cannot do
+	 * better than one fetch per returned row.
+	 */
+	if (path->path.pathtype != T_IndexOnlyScan)
+		run_cost += numGroups * spc_random_page_cost;
+
 	path->path.rows = numGroups;
 	path->indexselectivity = Min(1.0, numGroups / Max(1.0, baserel->tuples));
 	path->path.startup_cost = startup_cost;
