@@ -7635,7 +7635,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 		 * build_index_paths).  For GROUP BY this may group by the columns
 		 * after an equality-fixed prefix.
 		 */
-		if (parse->groupClause != NIL && root->group_pathkeys != NIL)
+		if (parse->groupClause != NIL && !parse->hasAggs &&
+			!parse->groupingSets && root->group_pathkeys != NIL)
 		{
 			ListCell   *lcl;
 
