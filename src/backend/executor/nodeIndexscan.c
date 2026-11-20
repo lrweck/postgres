@@ -120,6 +120,9 @@ IndexNext(IndexScanState *node)
 
 		node->iss_ScanDesc = scandesc;
 
+		scandesc->xs_num_skip_atts = node->iss_NumSkipAtts;
+		scandesc->xs_skip_descend = node->iss_SkipDescend;
+
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
 		 * pass the scankeys to the index AM.
@@ -128,6 +131,18 @@ IndexNext(IndexScanState *node)
 			index_rescan(scandesc,
 						 node->iss_ScanKeys, node->iss_NumScanKeys,
 						 node->iss_OrderByKeys, node->iss_NumOrderByKeys);
+	}
+
+	/*
+	 * If the previous tuple was accepted, advance past the rest of its group
+	 * before fetching the next tuple.  Deferred to here so the previous result
+	 * slot is no longer in use.
+	 */
+	if (node->iss_SkipPending)
+	{
+		node->iss_SkipPending = false;
+		if (ScanDirectionIsForward(direction))
+			(void) index_skip_group(scandesc);
 	}
 
 	/*
@@ -151,6 +166,13 @@ IndexNext(IndexScanState *node)
 				continue;
 			}
 		}
+
+		/*
+		 * Plain index scans can be walking a HOT chain (non-MVCC snapshots);
+		 * skipping the index position would not stop those heap tuples.
+		 */
+		if (node->iss_NumSkipAtts > 0 && !scandesc->xs_heap_continue)
+			node->iss_SkipPending = true;
 
 		return slot;
 	}
@@ -589,6 +611,7 @@ ExecReScanIndexScan(IndexScanState *node)
 	}
 
 	/* reset index scan */
+	node->iss_SkipPending = false;
 	if (node->iss_ScanDesc)
 		index_rescan(node->iss_ScanDesc,
 					 node->iss_ScanKeys, node->iss_NumScanKeys,
@@ -926,6 +949,10 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
 	indexstate->ss.ps.ExecProcNode = ExecIndexScan;
+
+	indexstate->iss_NumSkipAtts = node->indexskipatts;
+	indexstate->iss_SkipDescend = node->indexskipdescend;
+	indexstate->iss_SkipPending = false;
 
 	/*
 	 * Miscellaneous initialization

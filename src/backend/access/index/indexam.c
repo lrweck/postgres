@@ -505,6 +505,25 @@ index_restrpos(IndexScanDesc scan)
 	scan->indexRelation->rd_indam->amrestrpos(scan);
 }
 
+/* ----------------
+ *		index_skip_group	-	advance past the current DISTINCT group
+ *
+ * Called by the executor after a returned tuple was accepted by all quals.
+ * Only index AMs that support loose (skip) scans provide the callback; for
+ * everybody else this is a no-op.
+ * ----------------
+ */
+bool
+index_skip_group(IndexScanDesc scan)
+{
+	SCAN_CHECKS;
+
+	if (scan->xs_skip_group == NULL)
+		return false;
+
+	return scan->xs_skip_group(scan);
+}
+
 /*
  * Estimates the shared memory needed for parallel scan, including any
  * AM-specific parallel scan state.

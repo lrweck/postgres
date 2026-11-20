@@ -1057,6 +1057,11 @@ typedef struct BTScanOpaqueData
 	int			numberOfKeys;	/* number of preprocessed scan keys */
 	ScanKey		keyData;		/* array of preprocessed scan keys */
 
+	/* loose (skip) scan: number of leading index columns per group */
+	int			nskipatts;
+	bool		skipdescend;	/* re-descend per group instead of walking */
+	bool		skipdone;		/* a re-descent landed past the last tuple */
+
 	/* workspace for SK_SEARCHARRAY support */
 	int			numArrayKeys;	/* number of equality-type array keys */
 	bool		skipScan;		/* At least one skip array in arrayKeys[]? */
@@ -1289,6 +1294,7 @@ extern OffsetNumber _bt_binsrch_insert(Relation rel, BTInsertState insertstate);
 extern int32 _bt_compare(Relation rel, BTScanInsert key, Page page, OffsetNumber offnum);
 extern bool _bt_first(IndexScanDesc scan, ScanDirection dir);
 extern bool _bt_next(IndexScanDesc scan, ScanDirection dir);
+extern bool _bt_looseskip(IndexScanDesc scan);
 extern Buffer _bt_get_endpoint(Relation rel, uint32 level, bool rightmost);
 
 /*

@@ -1053,6 +1053,12 @@ typedef struct RelOptInfo
 	List	   *pathlist;		/* Path structures */
 	List	   *ppilist;		/* ParamPathInfos used in pathlist */
 	List	   *partial_pathlist;	/* partial Paths */
+	/*
+	 * Forward index paths kept aside as candidates for loose (skip) scans.
+	 * add_path() may discard one of these in favor of a same-ordering path on
+	 * another index; a loose scan needs to inspect each index's own path.
+	 */
+	List	   *loose_pathlist;
 	struct Path *cheapest_startup_path;
 	struct Path *cheapest_total_path;
 	List	   *cheapest_parameterized_paths;
@@ -2080,6 +2086,14 @@ typedef struct IndexPath
 	List	   *indexorderbys;
 	List	   *indexorderbycols;
 	ScanDirection indexscandir;
+	/*
+	 * Loose (skip) scan: number of leading index columns that form one
+	 * DISTINCT group; 0 for an ordinary index scan.  The path must be an
+	 * index-only path over a btree index, and the executor must have no
+	 * remaining filter quals.
+	 */
+	int			indexskipatts;
+	bool		indexskipdescend;	/* skip by re-descending the tree */
 	Cost		indextotalcost;
 	Selectivity indexselectivity;
 } IndexPath;

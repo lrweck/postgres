@@ -243,6 +243,10 @@ btgettuple(IndexScanDesc scan, ScanDirection dir)
 	/* btree indexes are never lossy */
 	scan->xs_recheck = false;
 
+	/* A loose-scan re-descent may have run off the end of the index */
+	if (so->skipdone)
+		return false;
+
 	/* Each loop iteration performs another primitive index scan */
 	do
 	{
@@ -363,6 +367,9 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 		so->keyData = NULL;
 
 	so->skipScan = false;
+	so->nskipatts = 0;
+	so->skipdescend = false;
+	so->skipdone = false;
 	so->needPrimScan = false;
 	so->scanBehind = false;
 	so->oppositeDirCheck = false;
@@ -381,6 +388,8 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	so->currTuples = so->markTuples = NULL;
 
 	scan->xs_itupdesc = RelationGetDescr(rel);
+
+	scan->xs_skip_group = _bt_looseskip;
 
 	scan->opaque = so;
 
@@ -423,9 +432,13 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	 * Note: so->dropPin should never change across rescans.
 	 */
 	so->dropPin = (!scan->xs_want_itup &&
+				   scan->xs_num_skip_atts == 0 &&
 				   IsMVCCLikeSnapshot(scan->xs_snapshot) &&
 				   scan->heapRelation != NULL);
 
+	so->nskipatts = scan->xs_num_skip_atts;
+	so->skipdescend = scan->xs_skip_descend;
+	so->skipdone = false;
 	so->markItemIndex = -1;
 	so->needPrimScan = false;
 	so->scanBehind = false;
