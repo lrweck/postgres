@@ -1840,6 +1840,15 @@ _bt_looseskip(IndexScanDesc scan)
 		BTScanPosUnpinIfPinned(so->currPos);
 
 		_bt_search(rel, NULL, key, &so->currPos.buf, BT_READ, false);
+
+		/*
+		 * This is a fresh index search, just like the one _bt_first() did at
+		 * the start of the scan.  Count it so EXPLAIN's "Index Searches"
+		 * reflects the re-descents instead of only the initial positioning.
+		 */
+		if (scan->instrument)
+			scan->instrument->nsearches++;
+
 		if (!BufferIsValid(so->currPos.buf))
 		{
 			/* Concurrent truncation left nothing to scan */
