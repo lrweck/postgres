@@ -515,8 +515,26 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 														flags);
 			break;
 		case T_Group:
-			plan = (Plan *) create_group_plan(root,
-											  (GroupPath *) best_path);
+			{
+				GroupPath  *gpath = (GroupPath *) best_path;
+
+				/*
+				 * A loose scan already returns one row per group, so a Group
+				 * node with no HAVING qual is a no-op.
+				 */
+				if (gpath->qual == NIL &&
+					IsA(gpath->subpath, IndexPath) &&
+					((IndexPath *) gpath->subpath)->indexskipatts > 0 &&
+					equal(gpath->path.pathtarget->exprs,
+						  gpath->subpath->pathtarget->exprs))
+				{
+					plan = create_plan_recurse(root, gpath->subpath,
+											   flags | CP_LABEL_TLIST);
+					break;
+				}
+
+				plan = (Plan *) create_group_plan(root, gpath);
+			}
 			break;
 		case T_Agg:
 			if (IsA(best_path, GroupingSetsPath))

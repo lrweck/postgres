@@ -233,10 +233,11 @@ static RelOptInfo *create_final_distinct_paths(PlannerInfo *root,
 static List *get_useful_pathkeys_for_distinct(PlannerInfo *root,
 											  List *needed_pathkeys,
 											  List *path_pathkeys);
-static IndexPath *make_loose_distinct_path(PlannerInfo *root,
-										   RelOptInfo *input_rel,
-										   Path *path,
-										   double numDistinctRows);
+static IndexPath *make_loose_scan_path(PlannerInfo *root,
+									   RelOptInfo *input_rel,
+									   Path *path,
+									   List *loosepathkeys,
+									   double numGroups);
 static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										PathTarget *target,
@@ -5339,29 +5340,31 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
- * make_loose_distinct_path
+ * make_loose_scan_path
  *		Build a loose (skip) scan variant of an index-only path, or NULL.
  *
  * A loose scan returns one row per distinct combination of the leading index
  * columns.  It is only equivalent to the input path (which must already be
- * sorted by the DISTINCT pathkeys) when:
+ * sorted by loosepathkeys) when:
  *	- it is a forward btree index-only scan on an unparameterized, plain rel,
- *	- the DISTINCT expressions match a prefix of the index's key columns,
+ *	- loosepathkeys match a prefix of the index's key columns,
  *	- every restriction clause is enforced exactly by the index (so there is
  *	  no qpqual that could reject the one row we keep per group).
+ *
+ * Used for plain DISTINCT, DISTINCT ON (where the outer Unique is a no-op) and
+ * GROUP BY without aggregation.
  */
 static IndexPath *
-make_loose_distinct_path(PlannerInfo *root, RelOptInfo *input_rel,
-						 Path *path, double numDistinctRows)
+make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
+					 List *loosepathkeys, double numGroups)
 {
-	Query	   *parse = root->parse;
 	IndexPath  *ipath;
 	IndexPath  *skip;
 	IndexOptInfo *index;
 	int			nskip = 0;
 	ListCell   *lc;
 
-	if (!enable_skipscan || parse->hasDistinctOn)
+	if (!enable_skipscan)
 		return NULL;
 
 	/* Single baserel only: a skip path is not valid above a join */
@@ -5410,7 +5413,7 @@ make_loose_distinct_path(PlannerInfo *root, RelOptInfo *input_rel,
 			return NULL;
 	}
 
-	if (!pathkeys_count_contained_in(root->distinct_pathkeys,
+	if (!pathkeys_count_contained_in(loosepathkeys,
 									 ipath->path.pathkeys, &nskip))
 		return NULL;
 
@@ -5418,13 +5421,13 @@ make_loose_distinct_path(PlannerInfo *root, RelOptInfo *input_rel,
 		return NULL;
 
 	/* No point when the input is already nearly unique */
-	if (numDistinctRows >= path->rows)
+	if (numGroups >= path->rows)
 		return NULL;
 
 	skip = palloc(sizeof(IndexPath));
 	memcpy(skip, ipath, sizeof(IndexPath));
 	skip->indexskipatts = nskip;
-	cost_skipscan_index(skip, root, numDistinctRows, nskip,
+	cost_skipscan_index(skip, root, numGroups, nskip,
 						&skip->indexskipdescend);
 
 	return skip;
@@ -5538,14 +5541,15 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				{
 					IndexPath  *skip_path;
 
-					skip_path = make_loose_distinct_path(root, input_rel,
-														 sorted_path,
-														 numDistinctRows);
+					skip_path = make_loose_scan_path(root, input_rel,
+													 sorted_path,
+													 root->distinct_pathkeys,
+													 numDistinctRows);
 					if (skip_path != NULL)
 						add_path(distinct_rel, (Path *)
 								 create_unique_path(root, distinct_rel,
 													(Path *) skip_path,
-													list_length(needed_pathkeys),
+													list_length(root->distinct_pathkeys),
 													numDistinctRows));
 				}
 
@@ -7602,14 +7606,32 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 				}
 				else if (parse->groupClause)
 				{
+					Path	   *group_input = path;
+
 					/*
 					 * We have GROUP BY without aggregation or grouping sets.
-					 * Make a GroupPath.
+					 * This is DISTINCT on the grouping columns: if the input
+					 * is already sorted by them, try a loose scan.  The Group
+					 * node above it is then a no-op and create_plan() elides
+					 * it.  HAVING can reject groups, so keep the Group node in
+					 * that case (by simply not building a loose path).
 					 */
+					if (path == path_save && havingQual == NIL)
+					{
+						IndexPath  *loose_path;
+
+						loose_path = make_loose_scan_path(root, input_rel,
+														  path,
+														  root->group_pathkeys,
+														  dNumGroups);
+						if (loose_path != NULL)
+							group_input = (Path *) loose_path;
+					}
+
 					add_path(grouped_rel, (Path *)
 							 create_group_path(root,
 											   grouped_rel,
-											   path,
+											   group_input,
 											   info->clauses,
 											   havingQual,
 											   dNumGroups));
