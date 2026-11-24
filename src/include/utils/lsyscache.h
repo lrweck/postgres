@@ -105,6 +105,7 @@ extern Datum get_attoptions(Oid relid, int16 attnum);
 extern Oid	get_cast_oid(Oid sourcetypeid, Oid targettypeid, bool missing_ok);
 extern char *get_collation_name(Oid colloid);
 extern bool get_collation_isdeterministic(Oid colloid);
+extern char get_collation_provider(Oid colloid);
 extern char *get_constraint_name(Oid conoid);
 extern Oid	get_constraint_index(Oid conoid);
 extern char get_constraint_type(Oid conoid);

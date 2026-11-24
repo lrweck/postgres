@@ -4048,3 +4048,26 @@ get_subscription_name(Oid subid, bool missing_ok)
 
 	return subname;
 }
+
+/*
+ * get_collation_provider
+ *		Return the provider of a collation, as a COLLPROVIDER_* character.
+ *
+ * The caller must pass a valid collation OID.
+ */
+char
+get_collation_provider(Oid colloid)
+{
+	HeapTuple	tp;
+	Form_pg_collation collform;
+	char		result;
+
+	tp = SearchSysCache1(COLLOID, ObjectIdGetDatum(colloid));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for collation %u", colloid);
+	collform = (Form_pg_collation) GETSTRUCT(tp);
+	result = collform->collprovider;
+	ReleaseSysCache(tp);
+	return result;
+}
+
