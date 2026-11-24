@@ -50,23 +50,44 @@ Essa dimensão é diferente do custo de cada chamada e da quantidade de valores 
 
 Esta é a oportunidade mais direta para um protótipo.
 
-Dentro da subquery, uma condição como `cs.item_sk = $1` pode ser estimada como uma igualdade com valor não constante. A estimativa genérica pode assumir que o valor comparado é igualmente provável entre os valores possíveis — aproximando a seletividade por `1 / ndistinct`.
+Dentro da subquery, uma condição como `cs.item_sk = $1` é estimada pelo caminho de igualdade com parâmetro não constante (`var_eq_non_const`). A estimativa genérica trata o valor ainda desconhecido como igualmente provável entre os valores distintos; em termos simplificados, usa aproximadamente `(1 - null_frac) / ndistinct`.
 
-Essa hipótese ignora que os valores de `$1` vêm de uma coluna externa com distribuição própria.
+O comentário do próprio código questiona essa hipótese: o valor comparado ainda não é conhecido, então o planner assume que qualquer valor possível é igualmente provável, independentemente da frequência real desse valor na tabela. Isso ignora que os valores de `$1` vêm de uma coluna externa com distribuição própria.
 
-O custo esperado correto, para esta aproximação, deve ponderar o custo interno de cada valor pela probabilidade de esse valor ser fornecido pelo lado externo:
+**Fórmula para a cardinalidade média por chamada.** Seja:
+
+- \(P_{outer}(v)\): probabilidade de uma linha externa fornecer o valor \(v\);
+- \(f_{inner}(v)\): número de linhas internas que correspondem ao valor \(v\).
+
+Então, o número esperado de linhas internas por chamada é:
+
+\[
+E[inner\_rows\ per\ call] =
+\sum_v P_{outer}(v) \cdot f_{inner}(v)
+\]
+
+Isso também pode ser expresso como a cardinalidade esperada do join pela chave dividida pelo número de linhas externas:
+
+\[
+E[inner\_rows\ per\ call] =
+\frac{|outer \bowtie_{key} inner|}{|outer|}
+\]
+
+A conexão com o estimador de join é importante: é essencialmente a estimativa de cardinalidade do join por igualdade dividida pelas linhas externas — a mesma área de estimativa que as PRs do usuário procuram melhorar. Para correlação por desigualdade, a hipótese anotada é usar a estimativa correspondente da PR #5.
+
+**Fórmula para o custo médio por chamada.** Mais geralmente, o custo esperado deve ponderar o custo interno de cada valor pela probabilidade de esse valor ser fornecido pelo lado externo:
 
 \[
 E[inner\_cost] = \sum_v P_{outer}(v) \cdot inner\_cost(v)
 \]
 
-Se a mesma coluna e a mesma distribuição forem usadas dos dois lados, uma aproximação para a fração esperada de correspondências é:
+Se a distribuição externa e a interna forem a mesma, e \(f(v)\) representar a frequência relativa de cada valor, a fração esperada de correspondências é proporcional a:
 
 \[
 \sum_v f(v)^2
 \]
 
-em que \(f(v)\) é a frequência relativa do valor \(v\). Isso difere de uma distribuição uniforme, cuja seletividade seria aproximadamente \(1 / ndistinct\).
+Essa expressão evidencia o efeito do *skew*: valores frequentes têm maior probabilidade de chegar pelo lado externo e também tendem a produzir mais linhas no lado interno. Para distribuições diferentes, deve-se manter a fórmula geral ponderada, sem substituir as duas distribuições por uma só.
 
 **Exemplo citado na investigação:** consultas TPC-DS como q32/q92, envolvendo `catalog_sales` e correlação por `item`. Cada linha externa fornece um item de acordo com a frequência de vendas desse item; a subquery consulta novamente linhas de `catalog_sales` para o mesmo item. Itens frequentes tendem a ser fornecidos mais vezes e também a produzir mais linhas na subquery. A média relevante é, portanto, ponderada pela distribuição externa, não uma escolha uniforme entre valores distintos.
 
