@@ -564,25 +564,25 @@ Para uma igualdade interna como `cs.item_sk = $1`, o caminho `var_eq_non_const` 
 
 Definindo (P_{outer}(v)) como a probabilidade de a entrada externa fornecer (v), e (f_{inner}(v)) como o número de linhas internas que correspondem a (v), a cardinalidade esperada por chamada é:
 
-\[
+$
 E[inner\_rows\ per\ call] =
 \sum_v P_{outer}(v) \cdot f_{inner}(v)
 =
 \frac{|outer \bowtie_{key} inner|}{|outer|}
-\]
+$
 
 Para custo por chamada, a forma geral é:
 
-\[
+$
 E[inner\_cost] =
 \sum_v P_{outer}(v) \cdot inner\_cost(v)
-\]
+$
 
 Se as distribuições externa e interna forem iguais e (f(v)) for a frequência relativa do valor, a fração esperada de correspondências é proporcional a:
 
-\[
+$
 \sum_v f(v)^2
-\]
+$
 
 Isso torna explícito o efeito do *skew*: valores frequentes são mais prováveis na entrada externa e também tendem a produzir mais linhas na subquery. Com distribuições diferentes, deve-se manter a ponderação geral, sem assumir que ambas são iguais.
 
