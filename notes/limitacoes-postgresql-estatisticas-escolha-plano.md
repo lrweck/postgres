@@ -556,6 +556,38 @@ Se o diagnóstico apontar o mecanismo 1 da seção 10.2, a correção mais diret
 
 A hipótese é que isso atacaria Q1, Q6, Q30, Q32, Q81 e Q92. A própria anotação ressalva que isso ainda não foi medido: é uma hipótese.
 
+### 10.8 Custo por chamada condicionado à distribuição do parâmetro
+
+A investigação complementar separa três grandezas: número de chamadas, custo médio por chamada e quantidade de valores distintos do parâmetro. Esta seção registra a segunda; a nota `correlated-subplan-cost-estimation.md` contém a análise completa.
+
+Para uma igualdade interna como `cs.item_sk = $1`, o caminho `var_eq_non_const` usa uma estimativa genérica próxima de `(1 - null_frac) / ndistinct`, tratando o valor desconhecido como igualmente provável. Isso ignora a distribuição da coluna externa que fornece `$1`.
+
+Definindo (P_{outer}(v)) como a probabilidade de a entrada externa fornecer (v), e (f_{inner}(v)) como o número de linhas internas que correspondem a (v), a cardinalidade esperada por chamada é:
+
+\[
+E[inner\_rows\ per\ call] =
+\sum_v P_{outer}(v) \cdot f_{inner}(v)
+=
+\frac{|outer \bowtie_{key} inner|}{|outer|}
+\]
+
+Para custo por chamada, a forma geral é:
+
+\[
+E[inner\_cost] =
+\sum_v P_{outer}(v) \cdot inner\_cost(v)
+\]
+
+Se as distribuições externa e interna forem iguais e (f(v)) for a frequência relativa do valor, a fração esperada de correspondências é proporcional a:
+
+\[
+\sum_v f(v)^2
+\]
+
+Isso torna explícito o efeito do *skew*: valores frequentes são mais prováveis na entrada externa e também tendem a produzir mais linhas na subquery. Com distribuições diferentes, deve-se manter a ponderação geral, sem assumir que ambas são iguais.
+
+A cardinalidade média por chamada pode ser relacionada diretamente à estimativa de join por igualdade dividida pelas linhas externas; para correlação por desigualdade, a hipótese anotada é usar a estimativa correspondente à PR #5. A distribuição marginal da coluna-base ainda não incorpora automaticamente filtros e joins externos (por exemplo, filtros em `manufacturer_id` podem alterar a distribuição de `item_sk`).
+
 ### 10.7 Próximo passo registrado
 
 Preparar um script de triagem que rode as queries nos dois builds, extraia `estimated rows` e `actual rows × loops` de `EXPLAIN (ANALYZE, FORMAT JSON)` e aponte o nó culpado. O script seria executado na máquina que contém o TPC-DS.
