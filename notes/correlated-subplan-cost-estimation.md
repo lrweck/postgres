@@ -61,31 +61,31 @@ O comentário do próprio código questiona essa hipótese: o valor comparado ai
 
 Então, o número esperado de linhas internas por chamada é:
 
-$
+$$
 E[inner\_rows\ per\ call] =
 \sum_v P_{outer}(v) \cdot f_{inner}(v)
-$
+$$
 
 Isso também pode ser expresso como a cardinalidade esperada do join pela chave dividida pelo número de linhas externas:
 
-$
+$$
 E[inner\_rows\ per\ call] =
 \frac{|outer \bowtie_{key} inner|}{|outer|}
-$
+$$
 
 A conexão com o estimador de join é importante: é essencialmente a estimativa de cardinalidade do join por igualdade dividida pelas linhas externas — a mesma área de estimativa que as PRs do usuário procuram melhorar. Para correlação por desigualdade, a hipótese anotada é usar a estimativa correspondente da PR #5.
 
 **Fórmula para o custo médio por chamada.** Mais geralmente, o custo esperado deve ponderar o custo interno de cada valor pela probabilidade de esse valor ser fornecido pelo lado externo:
 
-$
+$$
 E[inner\_cost] = \sum_v P_{outer}(v) \cdot inner\_cost(v)
-$
+$$
 
 Se a distribuição externa e a interna forem a mesma, e $f(v)$ representar a frequência relativa de cada valor, a fração esperada de correspondências é proporcional a:
 
-$
+$$
 \sum_v f(v)^2
-$
+$$
 
 Essa expressão evidencia o efeito do *skew*: valores frequentes têm maior probabilidade de chegar pelo lado externo e também tendem a produzir mais linhas no lado interno. Para distribuições diferentes, deve-se manter a fórmula geral ponderada, sem substituir as duas distribuições por uma só.
 
