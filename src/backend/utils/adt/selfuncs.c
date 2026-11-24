@@ -2379,6 +2379,272 @@ rowcomparesel(PlannerInfo *root,
 	return s1;
 }
 
+/* one restriction on a join column, and which side of it the column is on */
+typedef struct
+{
+	RestrictInfo *rinfo;		/* the clause, also used for its selectivity */
+	bool		var_left;		/* is the column the operator's left input? */
+} JoinKeyRestriction;
+
+/*
+ * join_key_clause_matches
+ *		True if a clause restricts the key of 'vardata' by a constant.
+ *
+ * Accepts "key op const", "const op key" and "key = ANY (const array)" with a
+ * strict same-type operator, which is what can be evaluated against a candidate
+ * key value directly.  On success *var_left says which side of the operator the
+ * key is on.
+ */
+static bool
+join_key_clause_matches(Node *key, Node *clause, bool *var_left)
+{
+	if (IsA(clause, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *) clause;
+		Node	   *left;
+		Node	   *right;
+		Node	   *con;
+
+		if (list_length(op->args) != 2 || op->opresulttype != BOOLOID)
+			return false;
+
+		left = (Node *) linitial(op->args);
+		right = (Node *) lsecond(op->args);
+		if (equal(left, key) && IsA(right, Const))
+		{
+			*var_left = true;
+			con = right;
+		}
+		else if (equal(right, key) && IsA(left, Const))
+		{
+			*var_left = false;
+			con = left;
+		}
+		else
+			return false;
+
+		/* op_strict() is a syscache lookup: ask only about the key's clauses. */
+		return !((Const *) con)->constisnull && op_strict(op->opno);
+	}
+	else if (IsA(clause, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+		Const	   *con;
+
+		if (list_length(saop->args) != 2 || !saop->useOr ||
+			!equal((Node *) linitial(saop->args), key) ||
+			!IsA(lsecond(saop->args), Const))
+			return false;
+
+		con = (Const *) lsecond(saop->args);
+		if (con->constisnull || !op_strict(saop->opno))
+			return false;
+
+		*var_left = true;
+		return true;
+	}
+	else if (IsA(clause, NullTest))
+	{
+		NullTest   *nt = (NullTest *) clause;
+
+		if (nt->argisrow || nt->nulltesttype != IS_NOT_NULL ||
+			!equal((Node *) nt->arg, key))
+			return false;
+
+		return true;
+	}
+
+	return false;
+}
+
+/*
+ * satisfies_join_key_restrictions
+ *		True if a key value satisfies all of the given restrictions.
+ *
+ * Every clause has already been accepted by join_key_clause_matches(), so it
+ * only has to be evaluated.  An empty restriction list accepts everything.
+ */
+static bool
+satisfies_join_key_restrictions(List *restrictions, Datum value)
+{
+	ListCell   *lc;
+
+	foreach(lc, restrictions)
+	{
+		JoinKeyRestriction *r = (JoinKeyRestriction *) lfirst(lc);
+		Node	   *clause = (Node *) r->rinfo->clause;
+		FmgrInfo	proc;
+		bool		result;
+
+		if (IsA(clause, NullTest))
+			continue;			/* no value passes it more than another */
+
+		if (IsA(clause, OpExpr))
+		{
+			OpExpr	   *op = (OpExpr *) clause;
+			Const	   *con = (Const *) (r->var_left ?
+									   lsecond(op->args) : linitial(op->args));
+			LOCAL_FCINFO(fcinfo, 2);
+
+			fmgr_info(get_opcode(op->opno), &proc);
+			InitFunctionCallInfoData(*fcinfo, &proc, 2, op->inputcollid,
+									 NULL, NULL);
+			fcinfo->args[r->var_left ? 0 : 1].value = value;
+			fcinfo->args[r->var_left ? 1 : 0].value = con->constvalue;
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].isnull = false;
+			fcinfo->isnull = false;
+
+			result = !fcinfo->isnull &&
+				DatumGetBool(FunctionCallInvoke(fcinfo));
+		}
+		else
+		{
+			ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+			ArrayType  *array;
+			Oid			elemtype;
+			int16		elmlen;
+			bool		elmbyval;
+			char		elmalign;
+			Datum	   *elems;
+			bool	   *nulls;
+			int			nelems;
+			int			i;
+
+			array = DatumGetArrayTypeP(((Const *) lsecond(saop->args))->constvalue);
+			elemtype = ARR_ELEMTYPE(array);
+			get_typlenbyvalalign(elemtype, &elmlen, &elmbyval, &elmalign);
+			deconstruct_array(array, elemtype, elmlen, elmbyval, elmalign,
+							  &elems, &nulls, &nelems);
+			fmgr_info(get_opcode(saop->opno), &proc);
+
+			result = false;
+			for (i = 0; i < nelems; i++)
+			{
+				LOCAL_FCINFO(fcinfo, 2);
+
+				if (nulls[i])
+					continue;
+				InitFunctionCallInfoData(*fcinfo, &proc, 2, saop->inputcollid,
+										 NULL, NULL);
+				fcinfo->args[0].value = value;
+				fcinfo->args[1].value = elems[i];
+				fcinfo->args[0].isnull = false;
+				fcinfo->args[1].isnull = false;
+				fcinfo->isnull = false;
+
+				if (!fcinfo->isnull &&
+					DatumGetBool(FunctionCallInvoke(fcinfo)))
+				{
+					result = true;
+					break;
+				}
+			}
+		}
+
+		if (!result)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * restrict_join_key_stats
+ *		Apply restrictions on the join column itself to its MCV list.
+ *
+ * A join column that is also restricted sees only part of its distribution, but
+ * the join selectivity is computed from the statistics of the whole column.  For
+ * a skewed column that is wrong by a lot: if half the rows hold one value and
+ * the restriction excludes that value, the rows that survive are nothing like
+ * the average.
+ *
+ * Only restrictions on the column itself can be applied here, because for those
+ * the conditional distribution is the column's own distribution restricted to
+ * the qualifying values, which is what the MCV list describes.  A restriction on
+ * some other column says nothing about which key values survive.
+ *
+ * Drops the values that fail the restrictions and rescales the frequencies of
+ * the rest to be conditional on them.  The caller must treat the null fraction
+ * as zero afterwards, since a strict restriction removes the nulls.
+ *
+ * Returns true when any value was dropped.
+ */
+static bool
+restrict_join_key_stats(PlannerInfo *root, VariableStatData *vardata,
+						AttStatsSlot *sslot)
+{
+	List	   *restrictions = NIL;
+	List	   *clauses = NIL;
+	ListCell   *lc;
+	double		sel_r;
+	int			i;
+	int			out;
+
+	if (sslot->nvalues == 0 ||
+		!IsA(vardata->var, Var) ||
+		vardata->rel == NULL ||
+		vardata->rel->baserestrictinfo == NIL)
+		return false;
+
+	foreach(lc, vardata->rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		JoinKeyRestriction *r;
+		bool		var_left;
+
+		if (!join_key_clause_matches(vardata->var, (Node *) rinfo->clause, &var_left))
+			continue;
+
+		r = palloc(sizeof(JoinKeyRestriction));
+		r->rinfo = rinfo;
+		r->var_left = var_left;
+		restrictions = lappend(restrictions, r);
+		clauses = lappend(clauses, rinfo);
+	}
+
+	if (restrictions == NIL)
+		return false;
+
+	sel_r = clauselist_selectivity(root, clauses, vardata->rel->relid,
+								   JOIN_INNER, NULL);
+	if (sel_r <= 0.0 || sel_r >= 1.0)
+		return false;
+
+	out = 0;
+	for (i = 0; i < sslot->nvalues; i++)
+	{
+		if (satisfies_join_key_restrictions(restrictions, sslot->values[i]))
+			out++;
+	}
+
+	/*
+	 * A restriction that keeps every value and every row leaves the column
+	 * where it was: rescaling by a selectivity that is 1 up to rounding would
+	 * only move the estimate.  When the restriction does exclude rows, the
+	 * surviving values have to be rescaled even if no MCV was dropped.
+	 */
+	if (out == sslot->nvalues &&
+		(!HeapTupleIsValid(vardata->statsTuple) ||
+		 ((Form_pg_statistic) GETSTRUCT(vardata->statsTuple))->stanullfrac <= 0.0) &&
+		sel_r > 1.0 - 1e-3)
+		return false;
+
+	out = 0;
+	for (i = 0; i < sslot->nvalues; i++)
+	{
+		if (!satisfies_join_key_restrictions(restrictions, sslot->values[i]))
+			continue;
+
+		sslot->values[out] = sslot->values[i];
+		sslot->numbers[out] = sslot->numbers[i] / sel_r;
+		out++;
+	}
+
+	sslot->nvalues = out;
+	return true;
+}
+
 /*
  *		eqjoinsel		- Join selectivity of "="
  */
@@ -2410,6 +2676,8 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	AttStatsSlot sslot2;
 	Form_pg_statistic stats1 = NULL;
 	Form_pg_statistic stats2 = NULL;
+	FormData_pg_statistic stats1_copy;
+	FormData_pg_statistic stats2_copy;
 	bool		have_mcvs1 = false;
 	bool		have_mcvs2 = false;
 	bool	   *hasmatch1 = NULL;
@@ -2463,6 +2731,27 @@ eqjoinsel(PG_FUNCTION_ARGS)
 			have_mcvs2 = get_attstatsslot(&sslot2, vardata2.statsTuple,
 										  STATISTIC_KIND_MCV, InvalidOid,
 										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+	}
+
+	/*
+	 * A join column restricted by a comparison on itself has a different
+	 * distribution than the statistics of the whole column describe.  Apply
+	 * those restrictions to the MCV lists before they are matched; a strict
+	 * restriction also removes the nulls, so the null fraction becomes zero.
+	 */
+	if (have_mcvs1 && stats1 != NULL &&
+		restrict_join_key_stats(root, &vardata1, &sslot1))
+	{
+		stats1_copy = *stats1;
+		stats1_copy.stanullfrac = 0;
+		stats1 = &stats1_copy;
+	}
+	if (have_mcvs2 && stats2 != NULL &&
+		restrict_join_key_stats(root, &vardata2, &sslot2))
+	{
+		stats2_copy = *stats2;
+		stats2_copy.stanullfrac = 0;
+		stats2 = &stats2_copy;
 	}
 
 	/* Prepare info usable by both eqjoinsel_inner and eqjoinsel_semi */
@@ -3256,12 +3545,236 @@ neqjoinsel(PG_FUNCTION_ARGS)
 }
 
 /*
+ * has_usable_distribution
+ *		True if scalarineqsel() can answer for this variable without falling
+ *		back on DEFAULT_INEQ_SEL.
+ *
+ * That is the case when the column has a histogram, or when its MCV list
+ * accounts for every non-null row, which is how a low-cardinality column is
+ * stored: ANALYZE keeps all the values in the MCV list and builds no histogram.
+ */
+static bool
+has_usable_distribution(VariableStatData *vardata)
+{
+	AttStatsSlot slot;
+	Form_pg_statistic stats;
+	double		sumcommon = 0.0;
+	int			i;
+
+	if (!HeapTupleIsValid(vardata->statsTuple))
+		return false;
+
+	if (get_attstatsslot(&slot, vardata->statsTuple,
+						 STATISTIC_KIND_HISTOGRAM, InvalidOid,
+						 ATTSTATSSLOT_VALUES))
+	{
+		bool		ok = (slot.nvalues >= 2);
+
+		free_attstatsslot(&slot);
+		if (ok)
+			return true;
+	}
+
+	/* Request the values too: nvalues is what counts the entries. */
+	if (get_attstatsslot(&slot, vardata->statsTuple,
+						 STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+	{
+		for (i = 0; i < slot.nvalues; i++)
+			sumcommon += slot.numbers[i];
+		free_attstatsslot(&slot);
+	}
+
+	stats = (Form_pg_statistic) GETSTRUCT(vardata->statsTuple);
+	return sumcommon >= 1.0 - stats->stanullfrac - 1e-6;
+}
+
+/*
+ * ineq_join_histogram_selectivity
+ *		Estimate P(left OP right) from the histograms and MCV lists of both
+ *		sides.
+ *
+ * For each value the right side can take, the fraction of the left side that
+ * satisfies the operator is exactly what scalarineqsel() computes for a
+ * constant of that value.  Weighting those fractions by the right side's own
+ * distribution turns a join into an average over its right input, which is why
+ * both MCV lists and both histograms participate: the left side through
+ * scalarineqsel(), the right side by being the distribution we average over.
+ *
+ * The right side's histogram buckets are represented by their bounds, and a
+ * bucket is charged the mean of the fractions at its two bounds.  That is
+ * exact for a value-uniform bucket and is the same assumption the histogram
+ * already makes elsewhere.
+ *
+ * The right side needs either a histogram or an MCV list that accounts for all
+ * of its rows, which is how a low-cardinality column is stored.  The left side
+ * is queried through scalarineqsel(), which is why has_usable_distribution()
+ * must hold for it as well.
+ *
+ * Returns -1 when the statistics cannot describe one of the sides well enough
+ * to beat DEFAULT_INEQ_SEL, which is the caller's signal to use that constant.
+ */
+static Selectivity
+ineq_join_histogram_selectivity(PlannerInfo *root, Oid operator,
+								bool isgt, bool iseq, Oid collation,
+								VariableStatData *vardata_left,
+								VariableStatData *vardata_right,
+								Oid righttype)
+{
+	AttStatsSlot hslot;
+	AttStatsSlot mslot;
+	Form_pg_statistic stats;
+	double		nullfrac;
+	double		rest;
+	double		result = 0.0;
+	int			i;
+
+	if (!HeapTupleIsValid(vardata_right->statsTuple) ||
+		!HeapTupleIsValid(vardata_left->statsTuple))
+		return -1.0;
+
+	/*
+	 * The left side is queried through scalarineqsel(), which falls back on
+	 * DEFAULT_INEQ_SEL for whatever its MCV list does not cover unless it also
+	 * has a histogram.  Bail out here rather than blend that constant into the
+	 * average and call it a measurement.
+	 */
+	if (!has_usable_distribution(vardata_left))
+		return -1.0;
+
+	/*
+	 * A histogram is optional here: a low-cardinality column keeps every value
+	 * in the MCV list and has no histogram at all, and if the MCVs account for
+	 * the whole column there is nothing left to distribute.  What is required
+	 * is that every remaining row can be placed somewhere.
+	 */
+	if (!get_attstatsslot(&hslot, vardata_right->statsTuple,
+						  STATISTIC_KIND_HISTOGRAM, InvalidOid,
+						  ATTSTATSSLOT_VALUES))
+		hslot.nvalues = 0;
+	else if (hslot.nvalues < 2)
+	{
+		free_attstatsslot(&hslot);
+		hslot.nvalues = 0;
+	}
+
+	stats = (Form_pg_statistic) GETSTRUCT(vardata_right->statsTuple);
+	nullfrac = stats->stanullfrac;
+
+	/* MCV part: each value gets its own exact fraction on the left side. */
+	rest = 1.0 - nullfrac;
+	if (get_attstatsslot(&mslot, vardata_right->statsTuple,
+						 STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+	{
+		for (i = 0; i < mslot.nvalues; i++)
+		{
+			Selectivity frac;
+
+			frac = scalarineqsel(root, operator, isgt, iseq, collation,
+								 vardata_left, mslot.values[i], righttype);
+			result += mslot.numbers[i] * frac;
+			rest -= mslot.numbers[i];
+		}
+		free_attstatsslot(&mslot);
+	}
+
+	/*
+	 * Whatever the MCV list did not account for must be placed by a histogram;
+	 * without one there is no way to know where those rows are.
+	 */
+	if (rest > 0.0 && hslot.nvalues < 2)
+	{
+		free_attstatsslot(&hslot);
+		return -1.0;
+	}
+
+	/*
+	 * Histogram part: the remaining mass spread over the buckets, each bucket
+	 * represented by the mean of the fractions at its two bounds.
+	 */
+	if (rest > 0.0)
+	{
+		double		per_bucket = rest / (hslot.nvalues - 1);
+		Selectivity lo;
+
+		lo = scalarineqsel(root, operator, isgt, iseq, collation,
+						   vardata_left, hslot.values[0], righttype);
+		for (i = 0; i < hslot.nvalues - 1; i++)
+		{
+			Selectivity hi;
+
+			hi = scalarineqsel(root, operator, isgt, iseq, collation,
+							   vardata_left, hslot.values[i + 1], righttype);
+			result += per_bucket * (lo + hi) / 2.0;
+			lo = hi;
+		}
+	}
+
+	free_attstatsslot(&hslot);
+
+	/*
+	 * Both 0 and 1 are legitimate answers: disjoint ranges never match, and a
+	 * side whose range lies entirely below the other always does.  Only the
+	 * absence of statistics is a reason to fall back.
+	 */
+	if (result < 0.0)
+		result = 0.0;
+	if (result > 1.0)
+		result = 1.0;
+
+	return result;
+}
+
+/*
+ * scalar_ineq_joinsel
+ *		Common code for scalarltjoinsel and friends.
+ *
+ * Only same-type comparisons are considered; a cross-type operator keeps
+ * DEFAULT_INEQ_SEL.  So does a join whose statistics cannot describe one of the
+ * sides well enough to beat that constant.
+ */
+static Selectivity
+scalar_ineq_joinsel(FunctionCallInfo fcinfo, bool isgt, bool iseq)
+{
+	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
+	Oid			operator = PG_GETARG_OID(1);
+	List	   *args = (List *) PG_GETARG_POINTER(2);
+	Node	   *left = (Node *) linitial(args);
+	Node	   *right = (Node *) lsecond(args);
+	VariableStatData vardata_left;
+	VariableStatData vardata_right;
+	Selectivity result = -1.0;
+	Oid			collation = PG_GET_COLLATION();
+
+	/* Only same-type comparisons can be averaged over the other histogram. */
+	if (exprType(left) != exprType(right))
+		return DEFAULT_INEQ_SEL;
+
+	examine_variable(root, left, 0, &vardata_left);
+	examine_variable(root, right, 0, &vardata_right);
+
+	result = ineq_join_histogram_selectivity(root, operator, isgt, iseq,
+											 collation,
+											 &vardata_left, &vardata_right,
+											 exprType(right));
+
+	ReleaseVariableStats(vardata_left);
+	ReleaseVariableStats(vardata_right);
+
+	if (result < 0.0)
+		return DEFAULT_INEQ_SEL;
+
+	return result;
+}
+
+/*
  *		scalarltjoinsel - Join selectivity of "<" for scalars
  */
 Datum
 scalarltjoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, false, false));
 }
 
 /*
@@ -3270,7 +3783,7 @@ scalarltjoinsel(PG_FUNCTION_ARGS)
 Datum
 scalarlejoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, false, true));
 }
 
 /*
@@ -3279,7 +3792,7 @@ scalarlejoinsel(PG_FUNCTION_ARGS)
 Datum
 scalargtjoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, true, false));
 }
 
 /*
@@ -3288,7 +3801,7 @@ scalargtjoinsel(PG_FUNCTION_ARGS)
 Datum
 scalargejoinsel(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+	PG_RETURN_FLOAT8(scalar_ineq_joinsel(fcinfo, true, true));
 }
 
 
@@ -3726,6 +4239,382 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 	varinfo->isdefault = isdefault;
 	varinfos = lappend(varinfos, varinfo);
 	return varinfos;
+}
+
+/*
+ * varinfo_index_for_attnum
+ *		Position of the given column in the varinfos list, or -1 if absent.
+ */
+static int
+varinfo_index_for_attnum(List *varinfos, AttrNumber attnum)
+{
+	ListCell   *lc;
+	int			i = 0;
+
+	foreach(lc, varinfos)
+	{
+		Var		   *var = (Var *) ((GroupVarInfo *) lfirst(lc))->var;
+
+		if (IsA(var, Var) && var->varattno == attnum)
+			return i;
+		i++;
+	}
+
+	return -1;
+}
+
+/*
+ * selfjoin_dependencies_selectivity
+ *		Selectivity of a self-join's column set, adjusted for functional
+ *		dependencies between the columns.
+ *
+ * dependencies_clauselist_selectivity() applies functional dependencies to
+ * restriction clauses on one relation.  A self-join reads the same joint
+ * distribution, so the same conditional probabilities apply: for a dependency
+ * of degree f whose first nattributes - 1 columns imply the last,
+ *
+ *	   P(b|a) = f * Min(P(a), P(b)) / P(a) + (1 - f) * P(b)
+ *
+ * which is the formula the core uses.  Columns the statistics object does not
+ * cover keep their independent selectivity.
+ *
+ * Returns the selectivity, or -1.0 when no dependencies object covers at least
+ * two of the columns.
+ */
+static double
+selfjoin_dependencies_selectivity(RelOptInfo *rel, List *varinfos)
+{
+	StatisticExtInfo *best = NULL;
+	int			best_matched = 0;
+	MVDependencies *deps;
+	double	   *attr_sel;
+	double		result = 1.0;
+	int			nattrs = list_length(varinfos);
+	int			i;
+	ListCell   *lc;
+
+	if (!has_stats_of_kind(rel->statlist, STATS_EXT_DEPENDENCIES))
+		return -1.0;
+
+	/* Use the statistics object covering the most of our columns. */
+	foreach(lc, rel->statlist)
+	{
+		StatisticExtInfo *info = (StatisticExtInfo *) lfirst(lc);
+		int			matched = 0;
+		ListCell   *lc2;
+
+		if (info->kind != STATS_EXT_DEPENDENCIES)
+			continue;
+
+		foreach(lc2, varinfos)
+		{
+			Var		   *var = (Var *) ((GroupVarInfo *) lfirst(lc2))->var;
+
+			if (IsA(var, Var) && bms_is_member(var->varattno, info->keys))
+				matched++;
+		}
+
+		if (matched > best_matched)
+		{
+			best_matched = matched;
+			best = info;
+		}
+	}
+
+	if (best == NULL || best_matched < 2)
+		return -1.0;
+
+	deps = statext_dependencies_load(best->statOid, false);
+	attr_sel = palloc_array(double, nattrs);
+
+	i = 0;
+	foreach(lc, varinfos)
+		attr_sel[i++] = 1.0 / ((GroupVarInfo *) lfirst(lc))->ndistinct;
+
+	/*
+	 * Apply the dependencies in reverse order, as the core does, so that a
+	 * column implied by an earlier dependency is corrected first.
+	 */
+	for (i = (int) deps->ndeps - 1; i >= 0; i--)
+	{
+		MVDependency *dep = deps->deps[i];
+		double		s1 = 1.0;
+		int			implied;
+		int			j;
+
+		implied = varinfo_index_for_attnum(varinfos,
+										   dep->attributes[dep->nattributes - 1]);
+		if (implied < 0)
+			continue;
+
+		/* All but the last attribute imply the last one. */
+		for (j = 0; j < dep->nattributes - 1; j++)
+		{
+			int			idx = varinfo_index_for_attnum(varinfos, dep->attributes[j]);
+
+			if (idx < 0)
+				break;
+			s1 *= attr_sel[idx];
+		}
+
+		/* Apply nothing when the implying columns are not all in the join. */
+		if (j < dep->nattributes - 1)
+			continue;
+
+		if (s1 <= attr_sel[implied])
+			attr_sel[implied] = dep->degree +
+				(1.0 - dep->degree) * attr_sel[implied];
+		else
+			attr_sel[implied] = dep->degree * attr_sel[implied] / s1 +
+				(1.0 - dep->degree) * attr_sel[implied];
+	}
+
+	for (i = 0; i < nattrs; i++)
+		result *= attr_sel[i];
+
+	pfree(attr_sel);
+	return result;
+}
+
+/*
+ * selfjoin_mcv_list
+ *		Return the multivariate MCV list that covers exactly the given columns.
+ *
+ * Only an exact match can be used: a list over a superset of the columns
+ * describes different groups, and its frequencies say nothing about the
+ * projection onto the join columns.
+ */
+static MCVList *
+selfjoin_mcv_list(RelOptInfo *rel, List *vars)
+{
+	ListCell   *lc;
+	Bitmapset  *attnums = NULL;
+
+	if (!has_stats_of_kind(rel->statlist, STATS_EXT_MCV))
+		return NULL;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+
+		attnums = bms_add_member(attnums, var->varattno);
+	}
+
+	foreach(lc, rel->statlist)
+	{
+		StatisticExtInfo *info = (StatisticExtInfo *) lfirst(lc);
+
+		if (info->kind != STATS_EXT_MCV)
+			continue;
+		if (!bms_equal(info->keys, attnums))
+			continue;
+
+		bms_free(attnums);
+		return statext_mcv_load(info->statOid, false);
+	}
+
+	bms_free(attnums);
+	return NULL;
+}
+
+/*
+ * estimate_selfjoin_selectivity
+ *		Estimate the selectivity of a multi-clause join of a relation to itself
+ *		from the joint statistics of the join columns.
+ *
+ * When both sides are aliases of the same base relation, the number of
+ * matching pairs is sum_g n_g^2 over the joint groups, which is N^2/D for a
+ * uniform D.  The per-clause product instead takes D to be the product of the
+ * per-column ndistinct counts, which is only right when the columns are
+ * independent: if one determines another, the true D is the determining
+ * column's count and the product understates the join by the dependent
+ * column's count.
+ *
+ * Both aliases read the same pg_statistic and pg_statistic_ext rows, so the
+ * joint information is available here.  In order of how much it knows:
+ *
+ *   - a multivariate MCV list over exactly these columns carries the actual
+ *     frequencies of the most common combinations, so the join is
+ *     sum(f_i^2) plus the uniform model over the remainder;
+ *   - a joint distinct count gives N^2/D, uniform over the combinations;
+ *   - functional dependencies say which columns determine which, and adjust
+ *     the per-column product accordingly;
+ *   - with none of those, the per-column product stands, which is exactly the
+ *     estimate the planner makes today.
+ *
+ * None of the objects is required: a relation without extended statistics gets
+ * the same answer it got before this code existed.
+ *
+ * Only inner joins are estimated here; the caller decides when to use it.
+ *
+ * Returns a selectivity in (0, 1], or -1.0 when the clause list is not a plain
+ * equijoin of a relation with itself.
+ */
+double
+estimate_selfjoin_selectivity(PlannerInfo *root,
+							  RelOptInfo *outer_rel,
+							  RelOptInfo *inner_rel,
+							  List *restrictlist)
+{
+	RangeTblEntry *outer_rte;
+	RangeTblEntry *inner_rte;
+	List	   *vars = NIL;
+	List	   *varinfos = NIL;
+	ListCell   *lc;
+	double		ndistinct = 1.0;
+
+	if (outer_rel == NULL || inner_rel == NULL || restrictlist == NIL)
+		return -1.0;
+	if (outer_rel->reloptkind != RELOPT_BASEREL ||
+		inner_rel->reloptkind != RELOPT_BASEREL)
+		return -1.0;
+
+	outer_rte = planner_rt_fetch(outer_rel->relid, root);
+	inner_rte = planner_rt_fetch(inner_rel->relid, root);
+	if (outer_rte->rtekind != RTE_RELATION ||
+		inner_rte->rtekind != RTE_RELATION ||
+		outer_rte->relid != inner_rte->relid)
+		return -1.0;
+
+	/*
+	 * Collect the outer-side Var of each clause.  Any clause that is not a
+	 * plain equality between the two rels means the join needs more than a
+	 * joint distinct count, so leave it to the per-clause estimate.
+	 */
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *left;
+		Node	   *right;
+		Var		   *var;
+
+		if (!rinfo->can_join || !is_opclause(rinfo->clause))
+			return -1.0;
+		op = (OpExpr *) rinfo->clause;
+		if (list_length(op->args) != 2)
+			return -1.0;
+		left = (Node *) linitial(op->args);
+		right = (Node *) lsecond(op->args);
+		if (!IsA(left, Var) || !IsA(right, Var))
+			return -1.0;
+		if (!op_mergejoinable(op->opno, exprType(left)))
+			return -1.0;
+
+		if (bms_is_member(((Var *) left)->varno, outer_rel->relids) &&
+			bms_is_member(((Var *) right)->varno, inner_rel->relids))
+			var = (Var *) left;
+		else if (bms_is_member(((Var *) right)->varno, outer_rel->relids) &&
+				 bms_is_member(((Var *) left)->varno, inner_rel->relids))
+			var = (Var *) right;
+		else
+			return -1.0;
+
+		vars = lappend(vars, var);
+	}
+
+	/* A single clause is the case the existing code already gets right. */
+	if (list_length(vars) < 2)
+		return -1.0;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+		VariableStatData vardata;
+
+		examine_variable(root, (Node *) var, 0, &vardata);
+		if (!vardata.statsTuple && !vardata.freefunc)
+		{
+			ReleaseVariableStats(vardata);
+			return -1.0;
+		}
+		varinfos = add_unique_group_var(root, varinfos, (Node *) var, &vardata);
+		ReleaseVariableStats(vardata);
+	}
+
+	while (varinfos)
+	{
+		double		mvndistinct;
+
+		if (estimate_multivariate_ndistinct(root, outer_rel, &varinfos,
+											&mvndistinct))
+			ndistinct *= mvndistinct;
+		else
+		{
+			double		depsel;
+
+			/*
+			 * No ndistinct statistics for this set.  Fall back on per-column
+			 * counts, adjusted for any functional dependencies the relation
+			 * has, which the independent product would ignore.
+			 */
+			depsel = selfjoin_dependencies_selectivity(outer_rel, varinfos);
+			if (depsel > 0.0)
+			{
+				ndistinct *= 1.0 / depsel;
+			}
+			else
+			{
+				foreach(lc, varinfos)
+				{
+					GroupVarInfo *varinfo = (GroupVarInfo *) lfirst(lc);
+
+					ndistinct *= varinfo->ndistinct;
+				}
+			}
+			varinfos = NIL;
+		}
+	}
+
+	if (ndistinct < 1.0)
+		return 1.0;
+
+	/*
+	 * A multivariate MCV list holds the actual frequencies of the most common
+	 * combinations.  The uniform model below assumes every distinct combination
+	 * occurs equally often, which understates a skewed self-join; when the list
+	 * is available, use the real frequencies for the values it covers and the
+	 * uniform model only for the remainder.
+	 */
+	{
+		MCVList    *mcv = selfjoin_mcv_list(outer_rel, vars);
+
+		if (mcv != NULL)
+		{
+			double		sel = 0.0;
+			double		sumf = 0.0;
+			double		rest;
+			int			i;
+			int			j;
+
+			for (i = 0; i < mcv->nitems; i++)
+			{
+				bool		hasnull = false;
+
+				for (j = 0; j < mcv->ndimensions; j++)
+				{
+					if (mcv->items[i].isnull[j])
+					{
+						hasnull = true;
+						break;
+					}
+				}
+				if (hasnull)
+					continue;
+
+				sel += mcv->items[i].frequency * mcv->items[i].frequency;
+				sumf += mcv->items[i].frequency;
+			}
+
+			rest = Max(1.0 - sumf, 0.0);
+			sel += (rest * rest) / Max(ndistinct - (double) mcv->nitems, 1.0);
+
+			if (sel > 0.0)
+				return Min(sel, 1.0);
+		}
+	}
+
+	return 1.0 / ndistinct;
 }
 
 /*
