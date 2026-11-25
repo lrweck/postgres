@@ -247,8 +247,22 @@ por laço, contra ~649 reais.
 dividir), tanto em `cost_index()` quanto em `compute_bitmap_pages()`. Resultado
 em DS22: o plano passa de nested loop (custo 1,10M, **27,5 s**) para hash join
 (custo 3,66M, **3,4 s**) — 8× mais rápido, coerente com a estimativa corrigida.
-O A/B completo em TPC-DS/TPC-H está em andamento para medir regressões antes de
-propor o patch.
+
+A/B completo (build só com o patch de custo sobre a pilha #5–#9, aquecido,
+teto de 100 s por query):
+
+| | |
+|---|---|
+| planos alterados | 88 |
+| TPC-DS (75 medidas) | 69,7 s → **51,6 s** (−26%) |
+| TPC-H (10 medidas) | 8,8 s → **7,2 s** (−18%) |
+| maiores ganhos | DS72 11,8 s → 0,18 s; H07 2,3 s → 0,24 s; DS78 2,3 s → 1,3 s; DS60 983 → 141 ms |
+| regressões | H09 1,45 → 2,37 s; H04 148 → 764 ms; DS69 115 → 372 ms |
+
+Net positivo, mas as regressões mostram que "páginas por laço" também erra
+quando o padrão é benéfico (poucos laços, páginas realmente reaproveitadas). O
+próximo passo é condicionar o modelo ao número de laços e à fração da relação
+tocada, antes de propor o patch.
 
 ### 1.5 Limites superiores (pessimistic estimation)
 
