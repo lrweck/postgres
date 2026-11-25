@@ -5542,4 +5542,24 @@ SELECT * FROM check_join_est_rows($$
 $$);
 DROP TABLE join_est_res, join_est_res2, join_est_resn;
 
+-- A set operation without ALL deduplicates, so its whole output row is a key:
+-- a join that equates every output column can match at most one row per input.
+-- Here a and b are dependent (b = a), so treating the two clauses as
+-- independent collapses the estimate to 1 while every row really matches.
+CREATE TABLE join_est_setop_a (a int, b int);
+CREATE TABLE join_est_setop_b (a int, b int);
+CREATE TABLE join_est_setop_probe (a int, b int);
+INSERT INTO join_est_setop_a SELECT g, g FROM generate_series(1, 100) g;
+INSERT INTO join_est_setop_b SELECT g, g FROM generate_series(1, 100) g;
+INSERT INTO join_est_setop_probe SELECT g, g FROM generate_series(1, 100) g;
+ANALYZE join_est_setop_a, join_est_setop_b, join_est_setop_probe;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_setop_probe p
+      JOIN (SELECT a, b FROM join_est_setop_a
+            INTERSECT
+            SELECT a, b FROM join_est_setop_b) s
+        ON p.a = s.a AND p.b = s.b
+$$);
+DROP TABLE join_est_setop_a, join_est_setop_b, join_est_setop_probe;
+
 DROP FUNCTION check_join_est_rows(text);
