@@ -5844,6 +5844,43 @@ typedef struct
 } JoinUniqueKey;
 
 /*
+ * subquery_grouping_key
+ *		The output columns a grouped subquery is unique on, if any.
+ *
+ * A plain GROUP BY emits one row per group, so its output cannot repeat a
+ * combination of the grouping columns: a join that equates all of them is
+ * bounded by the other side's rows, exactly as a unique index would bound it,
+ * even though there is no index to prove it.  Set operations and grouping sets
+ * rebuild the rows and are excluded, and DISTINCT is left alone because its
+ * key is the whole output row.
+ */
+static bool
+subquery_grouping_key(RelOptInfo *rel, Bitmapset **attnos)
+{
+	Query	   *subquery;
+	ListCell   *lc;
+
+	*attnos = NULL;
+	if (rel->subroot == NULL)
+		return false;
+
+	subquery = rel->subroot->parse;
+	if (subquery->setOperations || subquery->groupingSets ||
+		subquery->groupClause == NIL)
+		return false;
+
+	foreach(lc, subquery->groupClause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle = get_sortgroupclause_tle(sgc, subquery->targetList);
+
+		*attnos = bms_add_member(*attnos, tle->resno);
+	}
+
+	return true;
+}
+
+/*
  * relation_has_composite_unique_index
  *		True if the relation has a unique index over two or more plain columns.
  *
@@ -5925,10 +5962,13 @@ joinrel_unique_key_selectivity(PlannerInfo *root,
 	ListCell   *lc;
 	double		nullfrac = 1.0;
 
-	if (uniquerel->reloptkind != RELOPT_BASEREL ||
-		uniquerel_rows <= 0.0 ||
-		list_length(restrictlist) < 2 ||
-		!relation_has_composite_unique_index(uniquerel))
+	if (uniquerel_rows <= 0.0 ||
+		list_length(restrictlist) < 2)
+		return -1.0;
+
+	if (uniquerel->subroot == NULL &&
+		(uniquerel->reloptkind != RELOPT_BASEREL ||
+		 !relation_has_composite_unique_index(uniquerel)))
 		return -1.0;
 
 	keys = palloc_array(JoinUniqueKey, list_length(restrictlist));
@@ -5982,6 +6022,75 @@ joinrel_unique_key_selectivity(PlannerInfo *root,
 			nkeys++;
 			joined = bms_add_member(joined, var_this->varattno);
 		}
+	}
+
+	if (uniquerel->subroot != NULL)
+	{
+		Bitmapset  *keyattnums = NULL;
+		List	   *othervars = NIL;
+		ListCell   *lc3;
+		double		nd_other;
+		int			j;
+
+		if (!subquery_grouping_key(uniquerel, &keyattnums) ||
+			!bms_is_subset(keyattnums, joined))
+		{
+			bms_free(keyattnums);
+			pfree(keys);
+			bms_free(joined);
+			return -1.0;
+		}
+
+		*keyclauses = NIL;
+		for (j = 0; j < nkeys; j++)
+		{
+			AttrNumber	attnum = keys[j].attnum;
+			VariableStatData vardata;
+
+			if (!bms_is_member(attnum, keyattnums))
+				continue;
+
+			/* NULLs never match, so each key column contributes its
+			 * non-null fraction. */
+			examine_variable(root, (Node *) keys[j].other, 0, &vardata);
+			if (HeapTupleIsValid(vardata.statsTuple))
+			{
+				Form_pg_statistic stats =
+					(Form_pg_statistic) GETSTRUCT(vardata.statsTuple);
+
+				nullfrac *= (1.0 - stats->stanullfrac);
+			}
+			ReleaseVariableStats(vardata);
+			othervars = lappend(othervars, keys[j].other);
+		}
+
+		foreach(lc3, restrictlist)
+		{
+			RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc3);
+			OpExpr	   *cop = (OpExpr *) rinfo->clause;
+			Node	   *cfirst = (Node *) linitial(cop->args);
+			Node	   *csecond = (Node *) lsecond(cop->args);
+			AttrNumber	att = 0;
+
+			if (IsA(cfirst, Var) &&
+				bms_is_member(((Var *) cfirst)->varno, uniquerel->relids))
+				att = ((Var *) cfirst)->varattno;
+			else if (IsA(csecond, Var) &&
+					 bms_is_member(((Var *) csecond)->varno, uniquerel->relids))
+				att = ((Var *) csecond)->varattno;
+
+			if (att > 0 && bms_is_member(att, keyattnums))
+				*keyclauses = lappend(*keyclauses, rinfo);
+		}
+
+		nd_other = join_ndistinct_of_vars(root, otherrel, othervars);
+		if (other_rows > 0.0)
+			nd_other = Min(nd_other, other_rows);
+
+		bms_free(keyattnums);
+		pfree(keys);
+		bms_free(joined);
+		return nullfrac / Max(nd_other, uniquerel_rows);
 	}
 
 	foreach(lc, uniquerel->indexlist)
