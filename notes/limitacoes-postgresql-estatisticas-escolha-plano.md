@@ -223,6 +223,33 @@ o hash join e roda em 3,4 s; com o default (4GB) escolhe o nested loop e roda em
 modelo de custo** para index scan parametrizado — a direção "NL off" da
 literatura, mas localizada.
 
+**Distribuição do padrão no TPC-DS SF1** (93 queries que rodaram; `EXPLAIN
+(ANALYZE, FORMAT JSON)` com `BUFFERS`):
+
+| métrica | valor |
+|---|---|
+| queries com index scan parametrizado (>100 laços) | **56 de 93** |
+| queries com mais de metade do tempo nesses nós | **21** |
+| piores | DS22 (90%), DS06 (94%), DS14 (2,7M laços) |
+
+O caso DS22 tem correlação 0,015 em `inventory.inv_item_sk` (tabela de 63.487
+páginas) e 10.079.536 leituras de página em 18.000 laços — ~1 página por linha,
+nada cacheado entre laços.
+
+**Onde o modelo erra** [código]: `cost_index()` e `compute_bitmap_pages()`
+calculam as páginas com a fórmula de Mackert–Lohman sobre `tuples_fetched ×
+loop_count` e depois **dividem por `loop_count`**. Isso supõe que cada página é
+lida uma vez em todos os laços e permanece em cache; o custo por laço vira
+`páginas_totais / laços`. Aqui: 63.487 páginas / 18.000 laços ≈ 3,5 páginas
+por laço, contra ~649 reais.
+
+**Experimento**: usar a fórmula por laço (sem multiplicar por `loop_count` e sem
+dividir), tanto em `cost_index()` quanto em `compute_bitmap_pages()`. Resultado
+em DS22: o plano passa de nested loop (custo 1,10M, **27,5 s**) para hash join
+(custo 3,66M, **3,4 s**) — 8× mais rápido, coerente com a estimativa corrigida.
+O A/B completo em TPC-DS/TPC-H está em andamento para medir regressões antes de
+propor o patch.
+
 ### 1.5 Limites superiores (pessimistic estimation)
 
 | Trabalho | Resultado no PostgreSQL |
