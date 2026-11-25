@@ -156,6 +156,41 @@ acrescentar custo de planejamento às demais queries**. O caso de DS30/DS81 é
 comum em star schema (dimensão de data filtrada por ano/mês), não uma exceção
 de query mal escrita.
 
+### 1.5 Direção proposta: distribuição do join por atributo da dimensão
+
+O que falta ao planner não é a distribuição da chave do fato nem a da chave da
+dimensão, é **quantas linhas do fato caem em cada valor do atributo pelo qual a
+dimensão é filtrada**. Para o caso medido: quantas linhas de `web_returns` por
+`d_year`. É uma distribuição compacta (21 valores em `date_dim`, dezenas em
+dimensões de categoria/status), ao contrário de um MCV sobre o par de chaves
+(2.113 valores aqui, 73.049 no domínio).
+
+Forma possível de estatística opt-in:
+
+```sql
+CREATE STATISTICS ON (d_year) FROM web_returns JOIN date_dim
+    ON wr_returned_date_sk = d_date_sk;
+```
+
+O `ANALYZE` guardaria, por valor do atributo, a contagem de linhas do join (e o
+`ndistinct` da chave), do mesmo jeito que `pg_statistic_ext` guarda MCV. Com
+isso, `WHERE d_year = 2000` daria exatamente 13.634, e a fórmula atual
+(`1/max(nd1, nd2)`) deixaria de ser usada quando o objeto existisse.
+
+Propriedades que atendem ao critério acima:
+
+- **sem objeto, nada muda**: nem custo de planejamento, nem plano;
+- **custo de coleta no `ANALYZE`**: uma agregação do join por atributo, limitada
+  às colunas listadas no objeto;
+- **escopo estreito**: só entra no cálculo de tamanho de join quando a dimensão
+  tem restrição em uma coluna coberta pelo objeto.
+
+Alternativa mais barata, porém arriscada: usar o `ndistinct` do lado FK como
+domínio (`1/min(nd1, nd2)`) quando ele for muito menor que as linhas da
+dimensão. Acerta o caso (12.397 contra 13.634) mas erra por 34× no join sem
+filtro, onde a resposta correta é `1/linhas_da_dimensão`. Não é uma troca
+aceitável como default; no máximo como *hint*.
+
 ### 1.5 Limites superiores (pessimistic estimation)
 
 | Trabalho | Resultado no PostgreSQL |
