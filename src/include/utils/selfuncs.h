@@ -226,6 +226,9 @@ extern void mergejoinscansel(PlannerInfo *root, Node *clause,
 extern double estimate_num_groups(PlannerInfo *root, List *groupExprs,
 								  double input_rows, List **pgset,
 								  EstimationInfo *estinfo);
+extern double estimate_having_selectivity(PlannerInfo *root, List *quals,
+										  double input_tuples,
+										  double num_groups);
 
 extern bool estimate_join_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 									List *vars, double *ndistinct);

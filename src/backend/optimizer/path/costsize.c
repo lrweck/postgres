@@ -2994,11 +2994,10 @@ cost_agg(Path *path, PlannerInfo *root,
 		total_cost += qual_cost.startup + output_tuples * qual_cost.per_tuple;
 
 		output_tuples = clamp_row_est(output_tuples *
-									  clauselist_selectivity(root,
-															 quals,
-															 0,
-															 JOIN_INNER,
-															 NULL));
+									  estimate_having_selectivity(root,
+																  quals,
+																  input_tuples,
+																  numGroups));
 	}
 
 	path->rows = output_tuples;

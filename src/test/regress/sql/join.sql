@@ -5562,4 +5562,18 @@ SELECT * FROM check_join_est_rows($$
 $$);
 DROP TABLE join_est_setop_a, join_est_setop_b, join_est_setop_probe;
 
+-- count(*) is known when every input row is its own group: no group can hold
+-- more than one row, so a HAVING comparison on count(*) has a definite answer
+-- instead of the generic inequality constant.
+CREATE TABLE join_est_having (k int, v int);
+INSERT INTO join_est_having SELECT g, g FROM generate_series(1, 1000) g;
+ANALYZE join_est_having;
+SELECT * FROM check_join_est_rows($$
+    SELECT k, count(*) FROM join_est_having GROUP BY k HAVING count(*) = 1
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT k, count(*) FROM join_est_having GROUP BY k HAVING count(*) > 1
+$$);
+DROP TABLE join_est_having;
+
 DROP FUNCTION check_join_est_rows(text);

@@ -5334,6 +5334,132 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 }
 
 /*
+ * evaluate a comparison of two int8 values by the operator's name
+ *
+ * The comparison operators on int8 are the built-in ones, so the name is a
+ * reliable description of the operation.
+ */
+static bool
+compare_int8_by_opname(int64 left, const char *opname, int64 right)
+{
+	switch (opname[0])
+	{
+		case '=':
+			return left == right;
+		case '<':
+			if (opname[1] == '=')
+				return left <= right;
+			if (opname[1] == '>')
+				return left != right;
+			return left < right;
+		case '>':
+			if (opname[1] == '=')
+				return left >= right;
+			return left > right;
+	}
+	return false;
+}
+
+/*
+ * estimate_having_selectivity
+ *		Selectivity of HAVING quals, with the exact case for count(*).
+ *
+ * The generic estimate for a qual on an aggregate is a constant, because the
+ * value the aggregate produces is not known.  There is one case where it is
+ * known exactly: when every input row is its own group, every group holds one
+ * row and count(*) is 1.  estimate_num_groups() returns exactly the input row
+ * count in that case, so it is enough to compare the two.
+ *
+ * That covers a GROUP BY on a unique key, and a set of grouping columns that
+ * the statistics already treat as distinct.  A comparison on count(*) then
+ * has selectivity 0 or 1, far better than the constant, which can be off by
+ * orders of magnitude when the group size is 1.
+ *
+ * Everything else, including count(*) over larger groups, falls back to the
+ * clause list estimate.
+ */
+double
+estimate_having_selectivity(PlannerInfo *root, List *quals,
+							double input_tuples, double num_groups)
+{
+	Node	   *qual;
+	OpExpr	   *op;
+	Aggref	   *agg;
+	Node	   *left;
+	Node	   *right;
+	Const	   *cst;
+	bool		agg_on_left;
+	const char *opname;
+	int64		k;
+	bool		result;
+
+	if (quals == NIL || num_groups < input_tuples ||
+		list_length(quals) != 1)
+		return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+
+	qual = (Node *) linitial(quals);
+	if (!IsA(qual, OpExpr))
+		return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+
+	op = (OpExpr *) qual;
+	if (list_length(op->args) != 2)
+		return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+
+	left = (Node *) linitial(op->args);
+	right = (Node *) lsecond(op->args);
+
+	if (IsA(left, Aggref))
+	{
+		agg = (Aggref *) left;
+		cst = IsA(right, Const) ? (Const *) right : NULL;
+		agg_on_left = true;
+	}
+	else if (IsA(right, Aggref))
+	{
+		agg = (Aggref *) right;
+		cst = IsA(left, Const) ? (Const *) left : NULL;
+		agg_on_left = false;
+	}
+	else
+		return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+
+	/* only count(*), compared against a non-null integer constant */
+	if (!agg->aggstar || agg->args != NIL ||
+		cst == NULL || cst->constisnull)
+		return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+
+	/*
+	 * count(*) returns int8, but the constant keeps whatever integer width it
+	 * was written with, so the comparison may use a cross-type operator.
+	 */
+	switch (cst->consttype)
+	{
+		case INT8OID:
+			k = DatumGetInt64(cst->constvalue);
+			break;
+		case INT4OID:
+			k = (int64) DatumGetInt32(cst->constvalue);
+			break;
+		case INT2OID:
+			k = (int64) DatumGetInt16(cst->constvalue);
+			break;
+		default:
+			return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+	}
+	opname = get_opname(op->opno);
+	if (opname == NULL)
+		return clauselist_selectivity(root, quals, 0, JOIN_INNER, NULL);
+
+	/* every group has one row, so count(*) is 1 */
+	if (agg_on_left)
+		result = compare_int8_by_opname(1, opname, k);
+	else
+		result = compare_int8_by_opname(k, opname, 1);
+
+	return result ? 1.0 : 0.0;
+}
+
+/*
  * Try to estimate the bucket size of the hash join inner side when the join
  * condition contains two or more clauses by employing extended statistics.
  *
