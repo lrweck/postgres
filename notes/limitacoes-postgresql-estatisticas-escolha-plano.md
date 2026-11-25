@@ -72,6 +72,15 @@
 2. **Correlação entre tabelas em star joins (4,2M x).** Exige estatística de join (CF 6724) ou amostragem no planejamento.
 3. **Semi, anti e outer joins.** As PRs só tratam inner joins. `eqjoinsel_semi` tem a mesma cegueira para filtros e chaves compostas [I].
 
+### 1.1.1 Pendência medida: self-join de CTE/subquery
+
+DS47 e DS57 estimam **1 linha** para joins que produzem 35.512 e 23.870. A
+forma é `v1, v1 v1_lag, v1 v1_lead` com igualdade em quatro colunas e
+`v1.rn = v1_lag.rn + 1`: o produto de nove seletividades desaba e o clamp
+arredonda para 1. O bound de chave única da #8 resolveria — as colunas do join
+cobrem a saída da CTE — mas ele exige `RELOPT_BASEREL`; aqui o lado é uma
+subquery. Fica registrado para depois do trabalho de estimativas gerais.
+
 ### 1.2 Clamp em 1 linha e inconsistência da estimativa
 
 **Mecanismo do clamp**
