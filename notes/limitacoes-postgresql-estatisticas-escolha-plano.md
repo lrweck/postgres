@@ -191,6 +191,17 @@ dimensão. Acerta o caso (12.397 contra 13.634) mas erra por 34× no join sem
 filtro, onde a resposta correta é `1/linhas_da_dimensão`. Não é uma troca
 aceitável como default; no máximo como *hint*.
 
+**Resultado do experimento** (2026-11-25): o limite da #8 já é, na prática,
+essa regra — `Max(nd_other, uniquerel_rows)` com as linhas filtradas da
+dimensão — e está desligado para chave de uma coluna. Removendo o gate, o caso
+isolado fica exato (358 → 11.960 contra 13.634 reais) e a suíte passa 243/243.
+No TPC-DS, porém, **77 dos 99 planos mudam** e há regressões grandes: DS22
+3,4 s → 30,5 s, DS95 139 ms → 3,9 s, DS39 1,7 s → 5,7 s, DS45 55 ms → 635 ms.
+A correção cascateia em queries multi-join e troca hash joins por nested loops
+com Memoize. Não é aceitável como default: falta uma guarda que só a aplique
+quando houver evidência de que as chaves filtradas da dimensão caem no domínio
+do fato, e essa evidência não existe nas estatísticas de coluna.
+
 ### 1.5 Limites superiores (pessimistic estimation)
 
 | Trabalho | Resultado no PostgreSQL |
