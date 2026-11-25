@@ -5850,9 +5850,13 @@ typedef struct
  * A plain GROUP BY emits one row per group, so its output cannot repeat a
  * combination of the grouping columns: a join that equates all of them is
  * bounded by the other side's rows, exactly as a unique index would bound it,
- * even though there is no index to prove it.  Set operations and grouping sets
- * rebuild the rows and are excluded, and DISTINCT is left alone because its
- * key is the whole output row.
+ * even though there is no index to prove it.
+ *
+ * A set operation without ALL also emits each row at most once, so its key is
+ * the whole output row, just like SELECT DISTINCT.  INTERSECT, EXCEPT and
+ * UNION (without ALL) all qualify; with ALL they keep duplicates and are left
+ * alone, as are grouping sets, which rebuild rows.  DISTINCT itself is still
+ * left alone.
  */
 static bool
 subquery_grouping_key(RelOptInfo *rel, Bitmapset **attnos)
@@ -5865,8 +5869,32 @@ subquery_grouping_key(RelOptInfo *rel, Bitmapset **attnos)
 		return false;
 
 	subquery = rel->subroot->parse;
-	if (subquery->setOperations || subquery->groupingSets ||
-		subquery->groupClause == NIL)
+
+	if (subquery->setOperations)
+	{
+		SetOperationStmt *top = (SetOperationStmt *) subquery->setOperations;
+
+		/*
+		 * With ALL the operation keeps duplicates, so the output row is not
+		 * unique.  A set-returning function in the target list would also
+		 * multiply rows, and no set operation can have grouping sets, but
+		 * check both for safety.
+		 */
+		if (top->all || subquery->hasTargetSRFs || subquery->groupingSets)
+			return false;
+
+		foreach(lc, subquery->targetList)
+		{
+			TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+			if (!tle->resjunk)
+				*attnos = bms_add_member(*attnos, tle->resno);
+		}
+
+		return *attnos != NULL;
+	}
+
+	if (subquery->groupingSets || subquery->groupClause == NIL)
 		return false;
 
 	foreach(lc, subquery->groupClause)
