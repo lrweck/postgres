@@ -5354,6 +5354,29 @@ RESET enable_mergejoin;
 DROP TABLE join_est_pk2, join_est_o2;
 
 
+
+-- A grouped subquery emits one row per group, so its output is unique on the
+-- grouping columns and a join that equates all of them cannot exceed the other
+-- side's rows.  Without that, the per-column products collapse to a single row.
+CREATE TABLE join_est_grp (a int, b int, v int);
+INSERT INTO join_est_grp SELECT i, i, i FROM generate_series(1, 2000) i;
+CREATE TABLE join_est_grp_dim (a int, b int, PRIMARY KEY (a, b));
+INSERT INTO join_est_grp_dim SELECT i, i FROM generate_series(1, 2000) i;
+ANALYZE join_est_grp;
+ANALYZE join_est_grp_dim;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM (SELECT a, b, sum(v) FROM join_est_grp GROUP BY a, b) g
+        JOIN join_est_grp_dim d USING (a, b)
+$$);
+
+-- Equating only part of the key is not a key, and the estimate stays where the
+-- per-column counts put it.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM (SELECT a, b, sum(v) FROM join_est_grp GROUP BY a, b) g
+        JOIN join_est_grp_dim d ON g.a = d.a
+$$);
+DROP TABLE join_est_grp, join_est_grp_dim;
+
 -- A join column that is restricted by a comparison on itself sees only part of
 -- its distribution, so the join is estimated from the conditional distribution
 -- rather than from the whole column.  It matters when the restriction excludes a
