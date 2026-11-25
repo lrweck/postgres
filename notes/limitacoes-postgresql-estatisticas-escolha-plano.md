@@ -106,7 +106,57 @@ Tornar o tamanho do `joinrel` independente do par e da ordem: um par canônico, 
 - O caso típico é fortemente correlacionado (`start < end` vale quase sempre). Independência entre histogramas melhora em relação a 1/3, mas não resolve.
 - O MCV estendido sobre (a, b) é o lugar certo para isso [I].
 
-### 1.4 Limites superiores (pessimistic estimation)
+### 1.4 Caso medido: fato × dimensão com filtro em outra coluna (DS30/DS81)
+
+Medição em TPC-DS SF1, `master` e build com as PRs #5–#9 (planos e custos
+estimados idênticos): [código]
+
+| objeto | número |
+|---|---|
+| `web_returns` | 71.763 linhas |
+| `wr_returned_date_sk` | 2.113 valores distintos, faixa 2450842..2452995 |
+| `date_dim.d_date_sk` | 73.049 linhas, única, 1900..2080 |
+| `WHERE d_year = 2000` | 365 linhas da dimensão |
+| estimativa do join | 358 linhas |
+| real | **13.634** (38×) |
+
+O erro se propaga: o CTE agregado `GROUP BY customer, state` é estimado em 327
+linhas e produz 13.143 (40×), e a subquery escalar correlacionada por estado
+passa a ser avaliada 13.143 vezes, com 6 linhas estimadas por chamada contra
+381 reais. Tempo: 9,3 s.
+
+**Mecanismo** [código]: sem MCVs dos dois lados, `eqjoinsel_inner` usa
+`1/max(nd1, nd2)`. Como o lado dimensão é chave única, `nd2` é o número de
+linhas da dimensão (73.049): a fórmula supõe que as chaves do fato se espalham
+por **todo** o domínio da dimensão. Aqui elas cobrem 2.113 chaves (1998–2003) e
+18,5% caem em 2000.
+
+**Por que estatística de coluna não resolve** [I]:
+
+- o filtro (`d_year`) está em outra coluna; mapear ano → faixa de `d_date_sk`
+  exige informação conjunta do lado da dimensão;
+- MCV estendido em `(d_date_sk, d_year)` teria 73.049 pares distintos — não
+  cabe na lista;
+- `dependencies` informa seletividade do par, não o conjunto de chaves
+  selecionadas;
+- o join é fato → dimensão, então a estatística relevante é do join, não da
+  tabela (CF 6724).
+
+**Direções, com custo** [I]:
+
+| direção | ganho | custo / risco |
+|---|---|---|
+| estatística de join opt-in (CF 6724) | exato no caso | objeto por join; sem custo quando ausente |
+| sonda de faixa de chave em tempo de plano (precedente: `get_actual_variable_range`) | bom para chaves densas/data | só vale se as chaves selecionadas forem contíguas; custo de planejamento local |
+| usar `ndistinct` do lado FK quando muito menor que a dimensão | ~10% de erro aqui | erra feio quando o filtro seleciona chaves fora do domínio do fato |
+
+Critério de aceitação: qualquer uma delas só pode valer quando o cenário se
+aplica (join de FK com chave única e restrição na dimensão) e **não pode
+acrescentar custo de planejamento às demais queries**. O caso de DS30/DS81 é
+comum em star schema (dimensão de data filtrada por ano/mês), não uma exceção
+de query mal escrita.
+
+### 1.5 Limites superiores (pessimistic estimation)
 
 | Trabalho | Resultado no PostgreSQL |
 |---|---|
