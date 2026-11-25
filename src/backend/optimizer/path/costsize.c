@@ -679,7 +679,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		 * pro-rate the costs for one scan.  In this case we assume all the
 		 * fetches are random accesses.
 		 */
-		pages_fetched = index_pages_fetched(tuples_fetched * loop_count,
+		pages_fetched = index_pages_fetched(tuples_fetched,
 											baserel->pages,
 											(double) index->pages,
 											root);
@@ -689,7 +689,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 		rand_heap_pages = pages_fetched;
 
-		max_IO_cost = (pages_fetched * spc_random_page_cost) / loop_count;
+		max_IO_cost = pages_fetched * spc_random_page_cost;
 
 		/*
 		 * In the perfectly correlated case, the number of pages touched by
@@ -7593,11 +7593,10 @@ compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel,
 		 * estimate the number of pages fetched by all the scans. Then
 		 * pro-rate for one scan.
 		 */
-		pages_fetched = index_pages_fetched(tuples_fetched * loop_count,
+		pages_fetched = index_pages_fetched(tuples_fetched,
 											baserel->pages,
 											get_indexpath_pages(bitmapqual),
 											root);
-		pages_fetched /= loop_count;
 	}
 
 	if (pages_fetched >= T)
