@@ -204,6 +204,12 @@ typedef struct
 	double		eq_selec;		/* selectivity of "var = const" outside it */
 } IneqJoinStats;
 
+static double ineq_join_histogram_selectivity(PlannerInfo *root, Oid operator,
+											  bool isgt, bool iseq,
+											  Oid collation,
+											  VariableStatData *vardata_left,
+											  VariableStatData *vardata_right,
+											  Oid righttype);
 static void ineq_join_stats_init(IneqJoinStats *stats, PlannerInfo *root,
 								 VariableStatData *vardata, Oid operator,
 								 Oid collation);
@@ -1572,6 +1578,48 @@ scalarineqsel_wrapper(PG_FUNCTION_ARGS, bool isgt, bool iseq)
 	 * If expression is not variable op something or something op variable,
 	 * then punt and return a default estimate.
 	 */
+	/*
+	 * A comparison between two columns of the same relation is not a constant,
+	 * but both distributions are at hand, and the estimate for "a < b" is the
+	 * average of P(a < v) over b -- the same expectation the inequality join
+	 * estimate computes across relations.  Everything else keeps the default.
+	 */
+	{
+		Node	   *leftop = (Node *) linitial(args);
+		Node	   *rightop = (Node *) lsecond(args);
+
+		if (IsA(leftop, Var) && IsA(rightop, Var) &&
+			((Var *) leftop)->varno == ((Var *) rightop)->varno &&
+			((Var *) leftop)->varlevelsup == 0 &&
+			((Var *) rightop)->varlevelsup == 0)
+		{
+			VariableStatData vd_left;
+			VariableStatData vd_right;
+			double		result;
+
+			examine_variable(root, leftop, varRelid, &vd_left);
+			examine_variable(root, rightop, varRelid, &vd_right);
+			if (vd_left.rel != NULL && vd_left.rel == vd_right.rel)
+			{
+				result = ineq_join_histogram_selectivity(root, operator,
+														 isgt, iseq,
+														 collation, &vd_left,
+														 &vd_right,
+														 exprType(rightop));
+				ReleaseVariableStats(vd_left);
+				ReleaseVariableStats(vd_right);
+				if (result >= 0.0)
+					PG_RETURN_FLOAT8(result);
+			}
+			else
+			{
+				ReleaseVariableStats(vd_left);
+				ReleaseVariableStats(vd_right);
+			}
+			PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);
+		}
+	}
+
 	if (!get_restriction_variable(root, args, varRelid,
 								  &vardata, &other, &varonleft))
 		PG_RETURN_FLOAT8(DEFAULT_INEQ_SEL);

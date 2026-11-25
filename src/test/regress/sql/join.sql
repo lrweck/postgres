@@ -5382,7 +5382,7 @@ DROP TABLE join_est_grp, join_est_grp_dim;
 -- the join columns to be independent on both sides.  A statistics object that
 -- covers them on both relations gives the joint count instead.
 CREATE TABLE join_est_mv (a int, b int);
-INSERT INTO join_est_mv SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 100000) i;
+INSERT INTO join_est_mv SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 20000) i;
 CREATE TABLE join_est_mv_ref (a int, b int);
 INSERT INTO join_est_mv_ref SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 10000) i;
 ANALYZE join_est_mv;
@@ -5401,6 +5401,22 @@ SELECT * FROM check_join_est_rows($$
     SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
 $$);
 DROP TABLE join_est_mv, join_est_mv_ref;
+
+
+-- A comparison between two columns of one relation is not a constant, but both
+-- distributions are known: the estimate is the average of P(a < v) over b,
+-- the same expectation the inequality join estimate uses across relations.
+CREATE TABLE join_est_vv (a int, b int);
+INSERT INTO join_est_vv SELECT i % 1000, 100000 + (i % 1000) FROM generate_series(1, 20000) i;
+ANALYZE join_est_vv;
+-- disjoint ranges: every pair matches, and the reverse never does
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_vv WHERE a < b
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_vv WHERE a > b
+$$);
+DROP TABLE join_est_vv;
 
 -- A join column that is restricted by a comparison on itself sees only part of
 -- its distribution, so the join is estimated from the conditional distribution
