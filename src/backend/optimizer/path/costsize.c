@@ -684,23 +684,27 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											(double) index->pages,
 											root);
 
+		if (indexonly)
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+
 		/*
 		 * When the scan is repeated, the pages of one loop are the ones that
 		 * matter unless the loops are likely to revisit them.  Charge the
-		 * whole one-loop page count when a loop touches a real share of the
-		 * relation (the keys differ, so the pages do too); otherwise amortize
-		 * across the loops as before, which is right when the scans repeat.
+		 * whole one-loop page count when the scans do not revisit the same
+		 * rows (different keys, so different pages); otherwise amortize across
+		 * the loops as before, which is right when the keys repeat.
+		 *
+		 * The amortization is applied after the index-only rounding, and is
+		 * not rounded itself: a scan that touches a fraction of a page per
+		 * loop must not be charged a whole page.
 		 */
 		if (loop_count > 1 &&
 			(baserel->pages < 100 ||
-			 pages_fetched * 100.0 < baserel->pages))
+			 tuples_fetched * loop_count > baserel->tuples))
 			pages_fetched = index_pages_fetched(tuples_fetched * loop_count,
 												baserel->pages,
 												(double) index->pages,
 												root) / loop_count;
-
-		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
 
 		rand_heap_pages = pages_fetched;
 
@@ -727,6 +731,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
 
 		min_IO_cost = (pages_fetched * spc_random_page_cost) / loop_count;
+
 	}
 	else
 	{
@@ -7615,7 +7620,7 @@ compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel,
 
 		if (loop_count > 1 &&
 			(baserel->pages < 100 ||
-			 pages_fetched * 100.0 < baserel->pages))
+			 tuples_fetched * loop_count > baserel->tuples))
 			pages_fetched = index_pages_fetched(tuples_fetched * loop_count,
 												baserel->pages,
 												get_indexpath_pages(bitmapqual),

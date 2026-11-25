@@ -1766,7 +1766,7 @@ on true limit 1;
    ->  Nested Loop Left Join
          ->  Seq Scan on tenk1 t1
          ->  Append
-               ->  Index Only Scan using tenk2_hundred on tenk2 t2
+               ->  Index Only Scan using tenk2_unique2 on tenk2 t2
                ->  Result
 (6 rows)
 
