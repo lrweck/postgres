@@ -4633,6 +4633,49 @@ selfjoin_mcv_list(RelOptInfo *rel, List *vars)
 }
 
 /*
+ * estimate_join_ndistinct
+ *		The joint distinct count of a set of columns, from extended statistics.
+ *
+ * Returns true only when statistics objects cover every column in the set.
+ * The caller already has the per-column product when they do not, and a
+ * partially composed count would only move the error around.
+ */
+bool
+estimate_join_ndistinct(PlannerInfo *root, RelOptInfo *rel, List *vars,
+						double *ndistinct)
+{
+	List	   *varinfos = NIL;
+	ListCell   *lc;
+	double		nd = 1.0;
+
+	if (rel->statlist == NIL || list_length(vars) < 2)
+		return false;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+		VariableStatData vardata;
+
+		examine_variable(root, (Node *) var, 0, &vardata);
+		varinfos = add_unique_group_var(root, varinfos, (Node *) var, &vardata);
+		ReleaseVariableStats(vardata);
+	}
+
+	while (varinfos)
+	{
+		double		mvndistinct;
+
+		if (!estimate_multivariate_ndistinct(root, rel, &varinfos,
+											 &mvndistinct))
+			return false;
+		nd *= mvndistinct;
+	}
+
+	*ndistinct = nd;
+	return true;
+}
+
+/*
  * estimate_selfjoin_selectivity
  *		Estimate the selectivity of a multi-clause join of a relation to itself
  *		from the joint statistics of the join columns.

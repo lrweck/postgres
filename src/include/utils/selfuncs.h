@@ -227,6 +227,9 @@ extern double estimate_num_groups(PlannerInfo *root, List *groupExprs,
 								  double input_rows, List **pgset,
 								  EstimationInfo *estinfo);
 
+extern bool estimate_join_ndistinct(PlannerInfo *root, RelOptInfo *rel,
+									List *vars, double *ndistinct);
+
 extern double estimate_selfjoin_selectivity(PlannerInfo *root,
 											RelOptInfo *outer_rel,
 											RelOptInfo *inner_rel,

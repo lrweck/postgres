@@ -6264,6 +6264,117 @@ same_base_relation(PlannerInfo *root, RelOptInfo *a, RelOptInfo *b)
 }
 
 /*
+ * joinrel_multivariate_selectivity
+ *		Selectivity for a multi-column equijoin, from extended statistics.
+ *
+ * Several equality clauses between the same two relations are estimated by
+ * multiplying their selectivities, which takes the join columns to be
+ * independent on both sides.  When a statistics object covers those columns on
+ * both relations, the joint count is known and the join is 1/max(nd1, nd2).
+ *
+ * Returns -1 when no object covers the columns on either side, leaving the
+ * clause list estimate in place; *keyclauses receives the clauses whose
+ * selectivity the caller must divide out before substituting.
+ */
+static double
+joinrel_multivariate_selectivity(PlannerInfo *root,
+								 RelOptInfo *outer_rel, RelOptInfo *inner_rel,
+								 List *restrictlist, List **keyclauses)
+{
+	List	   *outer_vars = NIL;
+	List	   *inner_vars = NIL;
+	double		nd_outer;
+	double		nd_inner;
+	double		nullfrac = 1.0;
+	ListCell   *lc;
+
+	*keyclauses = NIL;
+
+	if (outer_rel->reloptkind != RELOPT_BASEREL ||
+		inner_rel->reloptkind != RELOPT_BASEREL ||
+		outer_rel->statlist == NIL || inner_rel->statlist == NIL)
+		return -1.0;
+
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *left;
+		Node	   *right;
+		bool		is_eq = false;
+		List	   *opfamilies;
+		ListCell   *lc2;
+
+		if (!rinfo->can_join || !is_opclause(rinfo->clause))
+			return -1.0;
+		op = (OpExpr *) rinfo->clause;
+		if (list_length(op->args) != 2)
+			return -1.0;
+		left = (Node *) linitial(op->args);
+		right = (Node *) lsecond(op->args);
+		if (!IsA(left, Var) || !IsA(right, Var))
+			return -1.0;
+
+		opfamilies = get_op_index_interpretation(op->opno);
+		foreach(lc2, opfamilies)
+		{
+			OpIndexInterpretation *bti = lfirst(lc2);
+
+			if (bti->cmptype == COMPARE_EQ)
+			{
+				is_eq = true;
+				break;
+			}
+		}
+		if (!is_eq)
+			return -1.0;
+
+		if (bms_is_member(((Var *) left)->varno, outer_rel->relids) &&
+			bms_is_member(((Var *) right)->varno, inner_rel->relids))
+		{
+			outer_vars = lappend(outer_vars, left);
+			inner_vars = lappend(inner_vars, right);
+		}
+		else if (bms_is_member(((Var *) right)->varno, outer_rel->relids) &&
+				 bms_is_member(((Var *) left)->varno, inner_rel->relids))
+		{
+			outer_vars = lappend(outer_vars, right);
+			inner_vars = lappend(inner_vars, left);
+		}
+		else
+			return -1.0;
+
+		*keyclauses = lappend(*keyclauses, rinfo);
+	}
+
+	if (list_length(outer_vars) < 2)
+		return -1.0;
+
+	if (!estimate_join_ndistinct(root, outer_rel, outer_vars, &nd_outer) ||
+		!estimate_join_ndistinct(root, inner_rel, inner_vars, &nd_inner))
+		return -1.0;
+
+	/* NULLs never match, so each join column contributes its non-null
+	 * fraction on both sides. */
+	foreach(lc, list_concat(list_copy(outer_vars), inner_vars))
+	{
+		VariableStatData vardata;
+
+		examine_variable(root, (Node *) lfirst(lc), 0, &vardata);
+		if (HeapTupleIsValid(vardata.statsTuple))
+		{
+			Form_pg_statistic stats =
+				(Form_pg_statistic) GETSTRUCT(vardata.statsTuple);
+
+			nullfrac *= (1.0 - stats->stanullfrac);
+		}
+		ReleaseVariableStats(vardata);
+	}
+
+	return nullfrac / Max(nd_outer, nd_inner);
+}
+
+/*
  * joinrel_key_selectivity
  *		Clause list selectivity with the unique-key estimate substituted.
  *
@@ -6450,6 +6561,8 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 			if (fkselec == 1.0)
 			{
 				double		keyselec;
+				List	   *mclauses = NIL;
+				double		mvselec;
 
 				keyselec = joinrel_key_selectivity(root, outer_rel, inner_rel,
 												   outer_rows, inner_rows,
@@ -6457,6 +6570,35 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 												   jointype, sjinfo);
 				if (keyselec >= 0.0)
 					jselec = keyselec;
+				else if (!same_base_relation(root, outer_rel, inner_rel) &&
+						 (mvselec = joinrel_multivariate_selectivity(root,
+																	 outer_rel,
+																	 inner_rel,
+																	 restrictlist,
+																	 &mclauses)) >= 0.0)
+				{
+					/*
+					 * The clause list already charged the join columns as
+					 * independent; divide that out and substitute the joint
+					 * estimate, leaving the other clauses' contribution.
+					 */
+					double		keyprod = 1.0;
+					ListCell   *lc;
+
+					foreach(lc, mclauses)
+					{
+						RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+						keyprod *= clause_selectivity(root,
+													  (Node *) rinfo->clause, 0,
+													  jointype, sjinfo);
+					}
+
+					if (keyprod > 0.0 && jselec > 0.0)
+						jselec = Min(jselec / keyprod * mvselec, 1.0);
+					else
+						jselec = mvselec;
+				}
 			}
 			nrows = outer_rows * inner_rows * fkselec * jselec;
 			/* pselec not used */

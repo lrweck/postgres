@@ -5377,6 +5377,31 @@ SELECT * FROM check_join_est_rows($$
 $$);
 DROP TABLE join_est_grp, join_est_grp_dim;
 
+
+-- A multi-column equijoin multiplies the per-column selectivities, which takes
+-- the join columns to be independent on both sides.  A statistics object that
+-- covers them on both relations gives the joint count instead.
+CREATE TABLE join_est_mv (a int, b int);
+INSERT INTO join_est_mv SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 100000) i;
+CREATE TABLE join_est_mv_ref (a int, b int);
+INSERT INTO join_est_mv_ref SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 10000) i;
+ANALYZE join_est_mv;
+ANALYZE join_est_mv_ref;
+-- without statistics: the independence product, a hundred times low
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
+$$);
+
+CREATE STATISTICS join_est_mv_s (ndistinct) ON a, b FROM join_est_mv;
+CREATE STATISTICS join_est_mv_rs (ndistinct) ON a, b FROM join_est_mv_ref;
+ANALYZE join_est_mv;
+ANALYZE join_est_mv_ref;
+-- the joint distinct count reproduces the actual size
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
+$$);
+DROP TABLE join_est_mv, join_est_mv_ref;
+
 -- A join column that is restricted by a comparison on itself sees only part of
 -- its distribution, so the join is estimated from the conditional distribution
 -- rather than from the whole column.  It matters when the restriction excludes a
