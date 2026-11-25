@@ -202,6 +202,27 @@ com Memoize. Não é aceitável como default: falta uma guarda que só a aplique
 quando houver evidência de que as chaves filtradas da dimensão caem no domínio
 do fato, e essa evidência não existe nas estatísticas de coluna.
 
+**Por que o plano piora: o custo, não a estimativa.** Em DS22, com a regra, a
+cardinalidade do join fica exata (11.744.894 estimadas contra 11.745.000
+reais), e mesmo assim o plano muda de hash join para nested loop com Memoize:
+
+| plano | custo estimado | tempo real |
+|---|---|---|
+| nested loop (escolhido) | 1.102.437 | **30,5 s** |
+| hash join (`enable_nestloop=off`) | 3.659.958 | **3,3 s** |
+
+O custo relativo está invertido por ~9×. A causa aparece no tempo por linha:
+o Index Scan parametrizado faz 652 linhas por laço, 18.000 laços, a **3 µs por
+linha**; um Seq Scan faz 24 ns por linha. O modelo cobra ~0,045 unidade por
+linha no index e ~0,01 no seq — razão de 2× para uma realidade de 125×.
+
+O modelo trata o acesso aleatório repetido como quase gratuito porque supõe o
+índice e o heap em cache. Com `effective_cache_size = 256MB` o planner escolhe
+o hash join e roda em 3,4 s; com o default (4GB) escolhe o nested loop e roda em
+30 s. Ou seja: a estatística corrigida expôs um problema de **calibração do
+modelo de custo** para index scan parametrizado — a direção "NL off" da
+literatura, mas localizada.
+
 ### 1.5 Limites superiores (pessimistic estimation)
 
 | Trabalho | Resultado no PostgreSQL |
