@@ -13363,7 +13363,6 @@ $$);
      10099 |  10100
 (1 row)
 
-
 -- A column whose MCV list holds every value and leaves no histogram: its
 -- frequencies are stored rounded, and the residue must not send the estimate
 -- back to the constant.
@@ -13382,7 +13381,6 @@ $$);
 (1 row)
 
 DROP TABLE join_est_hist, join_est_mcv;
-
 -- A side whose statistics do not describe its distribution keeps the constant
 -- rather than inventing a distribution from nothing.  The row count is known
 -- here, so only the join selectivity falls back.
@@ -13704,6 +13702,38 @@ $$);
 (1 row)
 
 DROP TABLE join_est_grp, join_est_grp_dim;
+-- A multi-column equijoin multiplies the per-column selectivities, which takes
+-- the join columns to be independent on both sides.  A statistics object that
+-- covers them on both relations gives the joint count instead.
+CREATE TABLE join_est_mv (a int, b int);
+INSERT INTO join_est_mv SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 100000) i;
+CREATE TABLE join_est_mv_ref (a int, b int);
+INSERT INTO join_est_mv_ref SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 10000) i;
+ANALYZE join_est_mv;
+ANALYZE join_est_mv_ref;
+-- without statistics: the independence product, a hundred times low
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
+$$);
+ estimated | actual  
+-----------+---------
+      9992 | 1000000
+(1 row)
+
+CREATE STATISTICS join_est_mv_s (ndistinct) ON a, b FROM join_est_mv;
+CREATE STATISTICS join_est_mv_rs (ndistinct) ON a, b FROM join_est_mv_ref;
+ANALYZE join_est_mv;
+ANALYZE join_est_mv_ref;
+-- the joint distinct count reproduces the actual size
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
+$$);
+ estimated | actual  
+-----------+---------
+   1000000 | 1000000
+(1 row)
+
+DROP TABLE join_est_mv, join_est_mv_ref;
 -- A join column that is restricted by a comparison on itself sees only part of
 -- its distribution, so the join is estimated from the conditional distribution
 -- rather than from the whole column.  It matters when the restriction excludes a
