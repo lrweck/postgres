@@ -684,6 +684,21 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 											(double) index->pages,
 											root);
 
+		/*
+		 * When the scan is repeated, the pages of one loop are the ones that
+		 * matter unless the loops are likely to revisit them.  Charge the
+		 * whole one-loop page count when a loop touches a real share of the
+		 * relation (the keys differ, so the pages do too); otherwise amortize
+		 * across the loops as before, which is right when the scans repeat.
+		 */
+		if (loop_count > 1 &&
+			(baserel->pages < 100 ||
+			 pages_fetched * 100.0 < baserel->pages))
+			pages_fetched = index_pages_fetched(tuples_fetched * loop_count,
+												baserel->pages,
+												(double) index->pages,
+												root) / loop_count;
+
 		if (indexonly)
 			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
 
@@ -7597,6 +7612,14 @@ compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel,
 											baserel->pages,
 											get_indexpath_pages(bitmapqual),
 											root);
+
+		if (loop_count > 1 &&
+			(baserel->pages < 100 ||
+			 pages_fetched * 100.0 < baserel->pages))
+			pages_fetched = index_pages_fetched(tuples_fetched * loop_count,
+												baserel->pages,
+												get_indexpath_pages(bitmapqual),
+												root) / loop_count;
 	}
 
 	if (pages_fetched >= T)
