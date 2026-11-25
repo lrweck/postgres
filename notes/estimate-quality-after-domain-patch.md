@@ -76,3 +76,18 @@ permitem. O próximo ganho não está em mais uma regra de join: está em
 
 O item 1 é o único que dá para melhorar sem objeto novo: `cost_agg()` já tem
 `input_tuples` e `num_groups`, então a média de linhas por grupo está na mão.
+
+## Atualização: PR #16 (HAVING count(*))
+
+O item 1 ganhou um primeiro pedaço. `cost_agg()` já recebe `input_tuples` e
+`num_groups`; quando os dois são iguais a estimativa diz que cada linha é seu
+próprio grupo, então `count(*)` é exatamente 1 e a comparação do HAVING tem
+resposta definida em vez do 1/3 genérico.
+
+DS23 (`having count(*) > 4`): 735.124 → **1** (real 43; q-error 17.096× → 43×).
+Só DS23 muda de plano nas 123 queries; o tempo fica em ~2,7 s (é acerto de
+estimativa, não ganho de tempo no corpus).
+
+Continua em aberto o caso de grupos com mais de uma linha (`sum(...) > k` em
+H18/DS78 e `count(*) > k` com grupo médio > 1), que precisaria de um modelo da
+distribuição do tamanho dos grupos.
