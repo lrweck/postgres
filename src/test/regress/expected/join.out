@@ -10218,9 +10218,9 @@ explain (costs off) select 1 from
  Nested Loop
    Join Filter: (k1.b = j2.b)
    ->  Nested Loop
-         ->  Index Scan using sk_a_idx on sk k1
          ->  Index Only Scan using sk_a_idx on sk k2
-               Index Cond: (a = k1.a)
+         ->  Index Scan using sk_a_idx on sk k1
+               Index Cond: (a = k2.a)
    ->  Materialize
          ->  Index Scan using sj_a_key on sj j2
                Index Cond: (a IS NOT NULL)
@@ -10234,9 +10234,9 @@ explain (costs off) select 1 from
  Nested Loop
    Join Filter: (k1.b = j2.b)
    ->  Nested Loop
-         ->  Index Scan using sk_a_idx on sk k1
          ->  Index Only Scan using sk_a_idx on sk k2
-               Index Cond: (a = k1.a)
+         ->  Index Scan using sk_a_idx on sk k1
+               Index Cond: (a = k2.a)
    ->  Materialize
          ->  Index Scan using sj_a_key on sj j2
                Index Cond: (a IS NOT NULL)
@@ -10677,9 +10677,22 @@ ON sj_t1.id = _t2t3t4.id;
  Nested Loop
    Join Filter: (sj_t3.id = sj_t1.id)
    ->  Nested Loop
-         Join Filter: (sj_t2.id = sj_t3.id)
-         ->  Nested Loop Semi Join
+         Join Filter: (sj_t3.id = sj_t2_1.id)
+         ->  Nested Loop
+               Join Filter: (sj_t2.id = sj_t3.id)
                ->  Nested Loop
+                     ->  HashAggregate
+                           Group Key: sj_t3_1.id
+                           ->  Nested Loop
+                                 ->  Seq Scan on sj_t4 sj_t4_1
+                                 ->  Materialize
+                                       ->  Bitmap Heap Scan on sj_t3 sj_t3_1
+                                             Recheck Cond: (a = 1)
+                                             ->  Bitmap Index Scan on sj_t3_a_id_idx
+                                                   Index Cond: (a = 1)
+                     ->  Index Only Scan using sj_t2_id_idx on sj_t2
+                           Index Cond: (id = sj_t3_1.id)
+               ->  Materialize
                      ->  HashAggregate
                            Group Key: sj_t3.id
                            ->  Nested Loop
@@ -10689,16 +10702,10 @@ ON sj_t1.id = _t2t3t4.id;
                                              Recheck Cond: (a = 1)
                                              ->  Bitmap Index Scan on sj_t3_a_id_idx
                                                    Index Cond: (a = 1)
-                     ->  Index Only Scan using sj_t2_id_idx on sj_t2 sj_t2_1
-                           Index Cond: (id = sj_t3.id)
-               ->  Nested Loop
-                     ->  Index Only Scan using sj_t3_a_id_idx on sj_t3 sj_t3_1
-                           Index Cond: ((a = 1) AND (id = sj_t3.id))
-                     ->  Seq Scan on sj_t4 sj_t4_1
-         ->  Index Only Scan using sj_t2_id_idx on sj_t2
-               Index Cond: (id = sj_t2_1.id)
+         ->  Index Only Scan using sj_t2_id_idx on sj_t2 sj_t2_1
+               Index Cond: (id = sj_t2.id)
    ->  Seq Scan on sj_t1
-(24 rows)
+(31 rows)
 
 -- Check SJE interaction with aggpresorted optimization.
 CREATE TEMP TABLE sje_agg (id int PRIMARY KEY, p int, q int);

@@ -2263,16 +2263,15 @@ SELECT count(*) FROM tenk1 LEFT JOIN tenk2 ON
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
  Aggregate
-   ->  Nested Loop Left Join
+   ->  Merge Left Join
+         Merge Cond: (tenk1.hundred = tenk2.hundred)
          Join Filter: (tenk1.hundred = 42)
          ->  Index Only Scan using tenk1_hundred on tenk1
-         ->  Memoize
-               Cache Key: tenk1.hundred
-               Cache Mode: logical
-               ->  Index Scan using tenk2_hundred on tenk2
-                     Index Cond: (hundred = tenk1.hundred)
+         ->  Sort
+               Sort Key: tenk2.hundred
+               ->  Seq Scan on tenk2
                      Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
-(10 rows)
+(9 rows)
 
 --
 -- Check behavior with duplicate index column contents

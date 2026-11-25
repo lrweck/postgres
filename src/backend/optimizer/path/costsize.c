@@ -699,12 +699,32 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 												(double) index->pages,
 												root) / loop_count;
 
-		if (indexonly)
-			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+		/*
+		 * Charge the pages that one loop touches at the price of a buffer hit,
+		 * and the pages that were not seen by the previous loops at the price
+		 * of a random read.  The Mackert and Lohman estimate over all the
+		 * loops gives the misses; the estimate for a single loop gives the
+		 * accesses.  Charging every access as a miss overprices scans whose
+		 * keys repeat, and charging only the misses underprices scans whose
+		 * keys do not.
+		 */
+		{
+			double		misses = pages_fetched;
+			double		accesses = index_pages_fetched(tuples_fetched,
+													  baserel->pages,
+													  (double) index->pages,
+													  root);
 
-		rand_heap_pages = pages_fetched;
+			if (indexonly)
+			{
+				misses = ceil(misses * (1.0 - baserel->allvisfrac));
+				accesses = ceil(accesses * (1.0 - baserel->allvisfrac));
+			}
 
-		max_IO_cost = pages_fetched * spc_random_page_cost;
+			rand_heap_pages = accesses;
+			max_IO_cost = misses * spc_random_page_cost +
+				Max(accesses - misses, 0.0) * cpu_tuple_cost;
+		}
 
 		/*
 		 * In the perfectly correlated case, the number of pages touched by

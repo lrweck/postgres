@@ -214,20 +214,16 @@ VACUUM ANALYZE expr_key;
 SELECT explain_memoize('
 SELECT * FROM expr_key t1 INNER JOIN expr_key t2
 ON t1.x = t2.t::numeric AND t1.t::numeric = t2.x;', false);
-                                       explain_memoize                                        
-----------------------------------------------------------------------------------------------
+                            explain_memoize                             
+------------------------------------------------------------------------
  Nested Loop (actual rows=80.00 loops=N)
+   Join Filter: ((t1.x = (t2.t)::numeric) AND ((t1.t)::numeric = t2.x))
+   Rows Removed by Join Filter: 1520
    ->  Seq Scan on expr_key t1 (actual rows=40.00 loops=N)
-   ->  Memoize (actual rows=2.00 loops=N)
-         Cache Key: t1.x, (t1.t)::numeric
-         Cache Mode: logical
-         Hits: 20  Misses: 20  Evictions: Zero  Overflows: 0  Memory Usage: NkB
-         ->  Index Only Scan using expr_key_idx_x_t on expr_key t2 (actual rows=2.00 loops=N)
-               Index Cond: (x = (t1.t)::numeric)
-               Filter: (t1.x = (t)::numeric)
-               Heap Fetches: N
-               Index Searches: N
-(11 rows)
+   ->  Materialize (actual rows=40.00 loops=N)
+         Storage: Memory  Maximum Storage: 18kB
+         ->  Seq Scan on expr_key t2 (actual rows=40.00 loops=N)
+(7 rows)
 
 DROP TABLE expr_key;
 -- Reduce work_mem and hash_mem_multiplier so that we see some cache evictions

@@ -2153,17 +2153,14 @@ SET LOCAL enable_hashagg TO off;
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Aggregate
-   ->  Nested Loop
-         ->  Unique
-               ->  Sort
-                     Sort Key: test3cs.x COLLATE case_insensitive
-                     ->  Index Only Scan using test3cs_x_idx on test3cs
+   ->  Nested Loop Semi Join
+         Join Filter: (test1ci.x = (test3cs.x)::text)
          ->  Index Only Scan using test1ci_x_idx on test1ci
-               Index Cond: (x = (test3cs.x)::text)
-(8 rows)
+         ->  Index Only Scan using test3cs_x_idx on test3cs
+(5 rows)
 
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
@@ -2177,16 +2174,14 @@ SET LOCAL enable_groupagg TO off;
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Aggregate
-   ->  Nested Loop
-         ->  HashAggregate
-               Group Key: (test3cs.x)::text
-               ->  Index Only Scan using test3cs_x_idx on test3cs
+   ->  Nested Loop Semi Join
+         Join Filter: (test1ci.x = (test3cs.x)::text)
          ->  Index Only Scan using test1ci_x_idx on test1ci
-               Index Cond: (x = (test3cs.x)::text)
-(7 rows)
+         ->  Index Only Scan using test3cs_x_idx on test3cs
+(5 rows)
 
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
@@ -2210,20 +2205,18 @@ EXPLAIN (COSTS OFF)
 SELECT t2.x, count(*) FROM test_memoize_ci t1
   LEFT JOIN test3cs t2 ON t2.x COLLATE case_sensitive = t1.x
 GROUP BY t2.x ORDER BY t2.x;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Sort
    Sort Key: t2.x COLLATE case_sensitive
    ->  HashAggregate
          Group Key: t2.x
          ->  Nested Loop Left Join
+               Join Filter: (t2.x = t1.x)
                ->  Seq Scan on test_memoize_ci t1
-               ->  Memoize
-                     Cache Key: t1.x
-                     Cache Mode: logical
-                     ->  Index Only Scan using test3cs_x_idx on test3cs t2
-                           Index Cond: (x = t1.x)
-(11 rows)
+               ->  Materialize
+                     ->  Seq Scan on test3cs t2
+(9 rows)
 
 -- Ensure we get the expected results
 SELECT t2.x, count(*) FROM test_memoize_ci t1

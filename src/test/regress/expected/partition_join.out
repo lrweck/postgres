@@ -781,8 +781,8 @@ SELECT t1.a, t1.c, t2.a, t2.c FROM prt4 t1 LEFT JOIN
   (SELECT t3.a, COALESCE(t3.c, t4.c) AS c FROM prt3 t3 JOIN prt1 t4 ON t3.a = t4.a
    WHERE t4.b = 0) t2 ON t1.a = t2.a
   WHERE t1.c = t2.c AND t2.a IS NOT NULL ORDER BY t1.a, t1.c;
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
  Sort
    Sort Key: t1.a, t1.c
    ->  Append
@@ -803,14 +803,16 @@ SELECT t1.a, t1.c, t2.a, t2.c FROM prt4 t1 LEFT JOIN
                ->  Index Only Scan using prt4_p2_c_a_idx on prt4_p2 t1_2
                      Index Cond: ((c = ((COALESCE(t3_2.c, t4_2.c)))::text) AND (a = t3_2.a))
          ->  Nested Loop
-               ->  Seq Scan on prt1_p3 t4_3
-                     Filter: (b = 0)
+               Join Filter: ((t3_3.a = t4_3.a) AND ((t1_3.c)::text = (COALESCE(t3_3.c, t4_3.c))::text))
                ->  Nested Loop
-                     ->  Index Scan using prt3_p3_a_idx on prt3_p3 t3_3
-                           Index Cond: ((a = t4_3.a) AND (a IS NOT NULL))
-                     ->  Index Only Scan using prt4_p3_c_a_idx on prt4_p3 t1_3
-                           Index Cond: ((c = ((COALESCE(t3_3.c, t4_3.c)))::text) AND (a = t3_3.a))
-(27 rows)
+                     Join Filter: (t1_3.a = t4_3.a)
+                     ->  Seq Scan on prt4_p3 t1_3
+                     ->  Materialize
+                           ->  Seq Scan on prt1_p3 t4_3
+                                 Filter: (b = 0)
+               ->  Index Scan using prt3_p3_a_idx on prt3_p3 t3_3
+                     Index Cond: ((a = t1_3.a) AND (a IS NOT NULL))
+(29 rows)
 
 SELECT t1.a, t1.c, t2.a, t2.c FROM prt4 t1 LEFT JOIN
   (SELECT t3.a, COALESCE(t3.c, t4.c) AS c FROM prt3 t3 JOIN prt1 t4 ON t3.a = t4.a
