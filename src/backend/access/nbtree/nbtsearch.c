@@ -1763,7 +1763,8 @@ _bt_looseskip_backward(IndexScanDesc scan, BTScanInsert key, Page page)
 	int			lo,
 				hi;
 
-	if (so->skipdescend && so->numArrayKeys == 0)
+	if (so->skipdescend && so->numArrayKeys == 0 &&
+		!IsolationIsSerializable())
 	{
 		BlockNumber prevblk,
 					lastblk;
@@ -1977,20 +1978,20 @@ _bt_looseskip(IndexScanDesc scan)
 	BlockNumber blkno;
 	int			lo,
 				hi;
+	bool		descend;
 
 	if (so->nskipatts <= 0 || !BTScanPosIsValid(so->currPos))
 		return false;
 
 	/*
-	 * A loose scan does not visit the heap pages (or, in descend mode, every
-	 * leaf page) of the entries it skips, so it cannot take the fine-grained
-	 * predicate locks SSI needs for those rows.  Any concurrent change that
-	 * can affect the distinct set must modify this index, so take a
-	 * relation-level predicate lock instead.  It is coarse, but it keeps the
-	 * skip and is correct.
+	 * Under SERIALIZABLE, use the leaf walk even when the cost model preferred
+	 * a re-descent.  The walk predicate-locks every leaf page it examines
+	 * (PredicateLockPage in _bt_readpage / the walk loops), which covers the
+	 * skipped groups; a re-descent jumps over pages and would leave them
+	 * unprotected.  The walk is still a loose scan (no per-tuple work), just
+	 * not the cheapest mode.
 	 */
-	if (IsolationIsSerializable())
-		PredicateLockRelation(scan->indexRelation, scan->xs_snapshot);
+	descend = so->skipdescend && !IsolationIsSerializable();
 
 	/* btrescan() keeps the leaf page pinned when a loose scan is requested */
 	Assert(BTScanPosIsPinned(so->currPos));
@@ -2041,7 +2042,7 @@ _bt_looseskip(IndexScanDesc scan)
 	 * land on an unlocked page, hiding a phantom.  The leaf walk locks every
 	 * page it looks at, so use it there.
 	 */
-	if (so->skipdescend && so->numArrayKeys == 0)
+	if (descend && so->numArrayKeys == 0)
 	{
 		BlockNumber nextblk,
 					lastblk;

@@ -1,0 +1,23 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_read s1_write s2_begin s2_read s2_update s1_commit s2_commit
+step s1_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s1_read: SELECT count(DISTINCT a) FROM ssi_t;
+count
+-----
+    3
+(1 row)
+
+step s1_write: INSERT INTO ssi_log VALUES (1);
+step s2_begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s2_read: SELECT count(*) FROM ssi_log;
+count
+-----
+    0
+(1 row)
+
+step s2_update: UPDATE ssi_t SET a = 'b'
+                 WHERE ctid = (SELECT ctid FROM ssi_t WHERE a = 'a' LIMIT 1);
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+ERROR:  could not serialize access due to read/write dependencies among transactions
