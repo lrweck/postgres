@@ -84,6 +84,9 @@ static const struct am_propname am_propnames[] =
 	{
 		"can_include", AMPROP_CAN_INCLUDE
 	},
+	{
+		"can_skip_scan", AMPROP_CAN_SKIP_SCAN
+	},
 };
 
 static IndexAMProperty
@@ -394,6 +397,9 @@ indexam_property(FunctionCallInfo fcinfo,
 
 		case AMPROP_CAN_INCLUDE:
 			PG_RETURN_BOOL(routine->amcaninclude);
+
+		case AMPROP_CAN_SKIP_SCAN:
+			PG_RETURN_BOOL(routine->amcanskipscan);
 
 		default:
 			PG_RETURN_NULL();

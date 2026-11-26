@@ -56,6 +56,7 @@ typedef enum IndexAMProperty
 	AMPROP_CAN_MULTI_COL,
 	AMPROP_CAN_EXCLUDE,
 	AMPROP_CAN_INCLUDE,
+	AMPROP_CAN_SKIP_SCAN,
 } IndexAMProperty;
 
 /*
