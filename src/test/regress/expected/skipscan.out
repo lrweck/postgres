@@ -26,7 +26,7 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
 ------------------------------------------------------------------
  Unique
    ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT a FROM skipscan_t GROUP BY a;
@@ -35,7 +35,7 @@ EXPLAIN (COSTS OFF) SELECT a FROM skipscan_t GROUP BY a;
  Group
    Group Key: a
    ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT a, b FROM skipscan_t;
@@ -51,7 +51,7 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t ORDER BY a, b;
 -------------------------------------------------------------
  Unique
    ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (3 rows)
 
 SELECT count(*) FROM (SELECT DISTINCT b FROM skipscan_t WHERE a = 1) s;
@@ -66,7 +66,7 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t
 ----------------------------------------------------------------------
  Unique
    ->  Index Only Scan Backward using skipscan_t_ab_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t
@@ -75,7 +75,7 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t
 --------------------------------------------------------
  Unique
    ->  Index Scan using skipscan_t_ab_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT a, min(b) FROM skipscan_t GROUP BY a;
@@ -84,7 +84,7 @@ EXPLAIN (COSTS OFF) SELECT a, min(b) FROM skipscan_t GROUP BY a;
  GroupAggregate
    Group Key: a
    ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT a, max(b) FROM skipscan_t GROUP BY a;
@@ -93,7 +93,7 @@ EXPLAIN (COSTS OFF) SELECT a, max(b) FROM skipscan_t GROUP BY a;
  GroupAggregate
    Group Key: a
    ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT a, count(*) FROM skipscan_t GROUP BY a;
@@ -207,7 +207,7 @@ EXPLAIN (COSTS OFF)
          ->  Hash Semi Join
                Hash Cond: (skipscan_t.a = skipscan_s.a)
                ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
                ->  Hash
                      ->  Seq Scan on skipscan_s
 (9 rows)
@@ -223,7 +223,7 @@ EXPLAIN (COSTS OFF)
          ->  Hash Semi Join
                Hash Cond: (skipscan_t.a = skipscan_s.a)
                ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
-   Skip Atts: 1 (descend)
+   Skip Atts: 1 (walk)
                ->  Hash
                      ->  Seq Scan on skipscan_s
 (9 rows)
@@ -232,18 +232,17 @@ EXPLAIN (COSTS OFF)
   SELECT DISTINCT a FROM skipscan_t
    WHERE NOT EXISTS (SELECT 1 FROM skipscan_s
                      WHERE skipscan_s.a = skipscan_t.a);
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
- Unique
-   ->  Sort
-         Sort Key: skipscan_t.a
-         ->  Hash Anti Join
-               Hash Cond: (skipscan_t.a = skipscan_s.a)
-               ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
-   Skip Atts: 1 (descend)
-               ->  Hash
-                     ->  Seq Scan on skipscan_s
-(9 rows)
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ HashAggregate
+   Group Key: skipscan_t.a
+   ->  Hash Anti Join
+         Hash Cond: (skipscan_t.a = skipscan_s.a)
+         ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+         ->  Hash
+               ->  Seq Scan on skipscan_s
+(8 rows)
 
 -- These need the rows the loose scan drops, so they must not use it.
 EXPLAIN (COSTS OFF)
