@@ -985,8 +985,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 		 */
 		if (scantype != ST_BITMAPSCAN &&
 			(root->distinct_pathkeys != NIL ||
-			 (root->group_pathkeys != NIL &&
-			  !root->parse->hasAggs && !root->parse->groupingSets)))
+			 root->group_pathkeys != NIL))
 		{
 			IndexPath  *loose_path;
 
@@ -1055,8 +1054,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 			 */
 			if (scantype != ST_BITMAPSCAN &&
 				(root->distinct_pathkeys != NIL ||
-				 (root->group_pathkeys != NIL &&
-				  !root->parse->hasAggs && !root->parse->groupingSets)))
+				 root->group_pathkeys != NIL))
 			{
 				IndexPath  *loose_path;
 

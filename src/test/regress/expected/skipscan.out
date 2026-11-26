@@ -7,6 +7,7 @@ INSERT INTO skipscan_t
   SELECT g % 100, (g / 100) % 10, 'x' FROM generate_series(1, 200000) g;
 CREATE INDEX skipscan_t_a_idx ON skipscan_t (a);
 CREATE INDEX skipscan_t_ab_idx ON skipscan_t (a, b);
+CREATE INDEX skipscan_t_ab_desc_idx ON skipscan_t (a, b DESC NULLS LAST);
 VACUUM ANALYZE skipscan_t;
 -- baseline plan
 SET enable_skipscan = off;
@@ -21,19 +22,19 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
 -- loose plans
 SET enable_skipscan = on;
 EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Unique
-   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
+   ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
    Skip Atts: 1 (descend)
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT a FROM skipscan_t GROUP BY a;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Group
    Group Key: a
-   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
+   ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
    Skip Atts: 1 (descend)
 (4 rows)
 
@@ -77,6 +78,24 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t
    Skip Atts: 1 (descend)
 (3 rows)
 
+EXPLAIN (COSTS OFF) SELECT a, min(b) FROM skipscan_t GROUP BY a;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ GroupAggregate
+   Group Key: a
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
+   Skip Atts: 1 (descend)
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT a, max(b) FROM skipscan_t GROUP BY a;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ GroupAggregate
+   Group Key: a
+   ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (descend)
+(4 rows)
+
 EXPLAIN (COSTS OFF) SELECT a, count(*) FROM skipscan_t GROUP BY a;
           QUERY PLAN          
 ------------------------------
@@ -113,6 +132,24 @@ SELECT count(*) FROM (SELECT DISTINCT ON (a) a, b FROM skipscan_t
 (1 row)
 
 SELECT count(*) FROM (SELECT a, count(*) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, min(b) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, max(b) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, min(b), max(b) FROM skipscan_t GROUP BY a) s;
  count 
 -------
    100

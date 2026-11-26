@@ -8,6 +8,7 @@ INSERT INTO skipscan_t
   SELECT g % 100, (g / 100) % 10, 'x' FROM generate_series(1, 200000) g;
 CREATE INDEX skipscan_t_a_idx ON skipscan_t (a);
 CREATE INDEX skipscan_t_ab_idx ON skipscan_t (a, b);
+CREATE INDEX skipscan_t_ab_desc_idx ON skipscan_t (a, b DESC NULLS LAST);
 VACUUM ANALYZE skipscan_t;
 
 -- baseline plan
@@ -25,6 +26,8 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t
   ORDER BY a DESC, b DESC;
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t
   ORDER BY a, b;
+EXPLAIN (COSTS OFF) SELECT a, min(b) FROM skipscan_t GROUP BY a;
+EXPLAIN (COSTS OFF) SELECT a, max(b) FROM skipscan_t GROUP BY a;
 EXPLAIN (COSTS OFF) SELECT a, count(*) FROM skipscan_t GROUP BY a;
 
 -- results
@@ -35,6 +38,9 @@ SELECT count(*) FROM (SELECT DISTINCT ON (a) a, b FROM skipscan_t
 SELECT count(*) FROM (SELECT DISTINCT ON (a) a, b FROM skipscan_t
                       ORDER BY a DESC, b DESC) s;
 SELECT count(*) FROM (SELECT a, count(*) FROM skipscan_t GROUP BY a) s;
+SELECT count(*) FROM (SELECT a, min(b) FROM skipscan_t GROUP BY a) s;
+SELECT count(*) FROM (SELECT a, max(b) FROM skipscan_t GROUP BY a) s;
+SELECT count(*) FROM (SELECT a, min(b), max(b) FROM skipscan_t GROUP BY a) s;
 
 -- on/off comparison
 SET enable_skipscan = off;

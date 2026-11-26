@@ -61,6 +61,7 @@
 #include "rewrite/rewriteManip.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
@@ -7551,6 +7552,87 @@ done:
 }
 
 /*
+ * loose_minmax_ok
+ *		Is the query's single aggregate a min()/max() that the first tuple of
+ *		each index group answers exactly?
+ *
+ * The loose scan returns the first tuple of the group in index order.  For an
+ * aggregate on the next key column after the grouping columns, that tuple has
+ * min(col) when the column is ASC NULLS LAST, or max(col) when it is DESC
+ * NULLS LAST.  Anything else (count, sum, multiple aggregates, DISTINCT,
+ * FILTER, ORDER BY within the aggregate) needs every row.
+ */
+static bool
+loose_minmax_ok(PlannerInfo *root, IndexOptInfo *index, int skipatts,
+				ScanDirection scandir)
+{
+	Aggref	   *aggref;
+	AggInfo    *agginfo;
+	Var		   *var;
+	int			attno;
+	char	   *aggname;
+	bool		ismin;
+	bool		backward = (scandir == BackwardScanDirection);
+	bool		reverse;
+	bool		nulls_first;
+
+	/* One aggregate function; multiple identical refs share the same state */
+	if (list_length(root->agginfos) != 1)
+		return false;
+
+	agginfo = linitial_node(AggInfo, root->agginfos);
+	aggref = linitial_node(Aggref, agginfo->aggrefs);
+
+	if (aggref->aggkind != AGGKIND_NORMAL || aggref->aggstar ||
+		aggref->aggdirectargs != NIL || aggref->aggdistinct != NIL ||
+		aggref->aggorder != NIL || aggref->aggfilter != NULL)
+		return false;
+
+	aggname = get_func_name(aggref->aggfnoid);
+	if (aggname == NULL)
+		return false;
+	ismin = (strcmp(aggname, "min") == 0);
+	if (!ismin && strcmp(aggname, "max") != 0)
+	{
+		pfree(aggname);
+		return false;
+	}
+	pfree(aggname);
+
+	if (list_length(aggref->args) != 1)
+		return false;
+
+	if (!IsA(linitial_node(TargetEntry, aggref->args)->expr, Var))
+		return false;
+
+	var = (Var *) linitial_node(TargetEntry, aggref->args)->expr;
+	if (var->varlevelsup != 0 || var->varno != index->rel->relid)
+		return false;
+
+	if (skipatts >= index->nkeycolumns)
+		return false;
+
+	attno = index->indexkeys[skipatts];
+	if (attno <= 0 || var->varattno != attno)
+		return false;
+
+	/* Effective ordering after the scan direction is applied */
+	reverse = index->reverse_sort[skipatts] != backward;
+	nulls_first = index->nulls_first[skipatts] != backward;
+
+	/* NULLS FIRST would put NULL ahead of the real min/max */
+	if (nulls_first)
+		return false;
+
+	if (ismin && reverse)
+		return false;
+	if (!ismin && !reverse)
+		return false;
+
+	return true;
+}
+
+/*
  * add_paths_to_grouping_rel
  *
  * Add non-partial paths to grouping relation.
@@ -7602,10 +7684,11 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 		/*
 		 * Loose-scan candidates, one forward path per index (see
 		 * build_index_paths).  For GROUP BY this may group by the columns
-		 * after an equality-fixed prefix.
+		 * after an equality-fixed prefix, and a single min()/max() on the
+		 * next key column can be answered by the first tuple of the group.
 		 */
-		if (parse->groupClause != NIL && !parse->hasAggs &&
-			!parse->groupingSets && root->group_pathkeys != NIL)
+		if (parse->groupClause != NIL && !parse->groupingSets &&
+			root->group_pathkeys != NIL)
 		{
 			ListCell   *lcl;
 
@@ -7626,13 +7709,30 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 													  root->group_pathkeys,
 													  dNumGroups,
 													  info->pathkeys);
-					if (loose_path != NULL)
+					if (loose_path == NULL)
+						continue;
+
+					if (!parse->hasAggs)
 						add_path(grouped_rel, (Path *)
 								 create_group_path(root, grouped_rel,
 												   (Path *) loose_path,
 												   info->clauses,
 												   havingQual,
 												   dNumGroups));
+					else if (loose_minmax_ok(root, loose_path->indexinfo,
+											 loose_path->indexskipatts,
+											 loose_path->indexscandir))
+						add_path(grouped_rel, (Path *)
+								 create_agg_path(root,
+												 grouped_rel,
+												 (Path *) loose_path,
+												 grouped_rel->reltarget,
+												 AGG_SORTED,
+												 AGGSPLIT_SIMPLE,
+												 info->clauses,
+												 havingQual,
+												 agg_costs,
+												 dNumGroups));
 				}
 			}
 		}
