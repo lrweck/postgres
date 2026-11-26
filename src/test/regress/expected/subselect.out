@@ -817,12 +817,11 @@ order by t1.a, t2.a;
                ->  Gather Merge
                      Output: t3.a, t3.b
                      Workers Planned: 2
-                     ->  Sort
+                     ->  Unique
                            Output: t3.a, t3.b
-                           Sort Key: t3.a, t3.b
-                           ->  HashAggregate
+                           ->  Sort
                                  Output: t3.a, t3.b
-                                 Group Key: t3.a, t3.b
+                                 Sort Key: t3.a, t3.b
                                  ->  Parallel Seq Scan on public.semijoin_unique_tbl t3
                                        Output: t3.a, t3.b
          ->  Memoize
@@ -844,7 +843,7 @@ order by t1.a, t2.a;
                      Sort Key: t1.a
                      ->  Parallel Seq Scan on public.semijoin_unique_tbl t1
                            Output: t1.a, t1.b
-(37 rows)
+(36 rows)
 
 reset enable_indexscan;
 reset max_parallel_workers_per_gather;

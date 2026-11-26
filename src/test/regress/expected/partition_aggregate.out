@@ -598,35 +598,24 @@ RESET enable_hashagg;
 -- GROUP BY is on nullable column
 EXPLAIN (COSTS OFF)
 SELECT b.y, sum(a.y) FROM pagg_tab1 a LEFT JOIN pagg_tab2 b ON a.x = b.y GROUP BY b.y ORDER BY 1 NULLS LAST;
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Sort
    Sort Key: b.y
-   ->  Finalize HashAggregate
+   ->  HashAggregate
          Group Key: b.y
-         ->  Append
-               ->  Partial HashAggregate
-                     Group Key: b.y
-                     ->  Hash Left Join
-                           Hash Cond: (a.x = b.y)
-                           ->  Seq Scan on pagg_tab1_p1 a
-                           ->  Hash
-                                 ->  Seq Scan on pagg_tab2_p1 b
-               ->  Partial HashAggregate
-                     Group Key: b_1.y
-                     ->  Hash Left Join
-                           Hash Cond: (a_1.x = b_1.y)
-                           ->  Seq Scan on pagg_tab1_p2 a_1
-                           ->  Hash
-                                 ->  Seq Scan on pagg_tab2_p2 b_1
-               ->  Partial HashAggregate
-                     Group Key: b_2.y
-                     ->  Hash Left Join
-                           Hash Cond: (a_2.x = b_2.y)
-                           ->  Seq Scan on pagg_tab1_p3 a_2
-                           ->  Hash
-                                 ->  Seq Scan on pagg_tab2_p3 b_2
-(26 rows)
+         ->  Hash Left Join
+               Hash Cond: (a.x = b.y)
+               ->  Append
+                     ->  Seq Scan on pagg_tab1_p1 a_1
+                     ->  Seq Scan on pagg_tab1_p2 a_2
+                     ->  Seq Scan on pagg_tab1_p3 a_3
+               ->  Hash
+                     ->  Append
+                           ->  Seq Scan on pagg_tab2_p1 b_1
+                           ->  Seq Scan on pagg_tab2_p2 b_2
+                           ->  Seq Scan on pagg_tab2_p3 b_3
+(15 rows)
 
 SELECT b.y, sum(a.y) FROM pagg_tab1 a LEFT JOIN pagg_tab2 b ON a.x = b.y GROUP BY b.y ORDER BY 1 NULLS LAST;
  y  | sum  

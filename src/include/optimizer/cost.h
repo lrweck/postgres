@@ -74,7 +74,7 @@
 #define COST_ROW_JOIN_NL    11.0
 #define COST_ROW_JOIN_HASH  0.21
 #define COST_ROW_JOIN_MERGE 0.97
-#define COST_ROW_AGG     2.15
+#define COST_ROW_AGG     5.5
 #define COST_ROW_SORT    0.585
 
 #define COST_ROW_INDEX   0.5
