@@ -33,6 +33,7 @@
 #include "access/genam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeIndexonlyscan.h"
@@ -94,8 +95,10 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		node->ioss_ScanDesc = scandesc;
 		Assert(node->ioss_ScanDesc->xs_want_itup);
 
-		scandesc->xs_num_skip_atts = node->ioss_NumSkipAtts;
-		scandesc->xs_skip_descend = node->ioss_SkipDescend;
+		scandesc->xs_num_skip_atts = node->ss.ss_SkipSupported ?
+			node->ioss_NumSkipAtts : 0;
+		scandesc->xs_skip_descend = node->ss.ss_SkipSupported ?
+			node->ioss_SkipDescend : false;
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -391,7 +394,8 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 
 	indexstate->ioss_NumSkipAtts = node->indexskipatts;
 	indexstate->ioss_SkipDescend = node->indexskipdescend;
-	indexstate->ss.ss_SkipSupported = (node->indexskipatts > 0);
+	indexstate->ss.ss_SkipSupported =
+		(node->indexskipatts > 0 && !IsolationIsSerializable());
 	indexstate->ss.ss_SkipPending = false;
 	indexstate->ss.ss_SkipDirection = NoMovementScanDirection;
 

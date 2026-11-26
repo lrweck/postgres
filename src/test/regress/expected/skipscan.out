@@ -21,32 +21,37 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
 -- loose plans
 SET enable_skipscan = on;
 EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
-                      QUERY PLAN                       
--------------------------------------------------------
- Index Only Scan using skipscan_t_ab_idx on skipscan_t
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
    Skip Atts: 1 (descend)
-(2 rows)
+(3 rows)
 
 EXPLAIN (COSTS OFF) SELECT a FROM skipscan_t GROUP BY a;
-                      QUERY PLAN                       
--------------------------------------------------------
- Index Only Scan using skipscan_t_ab_idx on skipscan_t
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Group
+   Group Key: a
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
    Skip Atts: 1 (descend)
-(2 rows)
+(4 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT a, b FROM skipscan_t;
-                      QUERY PLAN                       
--------------------------------------------------------
- Index Only Scan using skipscan_t_ab_idx on skipscan_t
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
    Skip Atts: 2 (walk)
-(2 rows)
+(3 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t ORDER BY a, b;
-                      QUERY PLAN                       
--------------------------------------------------------
- Index Only Scan using skipscan_t_ab_idx on skipscan_t
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
    Skip Atts: 1 (descend)
-(2 rows)
+(3 rows)
 
 SELECT count(*) FROM (SELECT DISTINCT b FROM skipscan_t WHERE a = 1) s;
  count 
@@ -56,19 +61,21 @@ SELECT count(*) FROM (SELECT DISTINCT b FROM skipscan_t WHERE a = 1) s;
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t
   ORDER BY a DESC, b DESC;
-                           QUERY PLAN                           
-----------------------------------------------------------------
- Index Only Scan Backward using skipscan_t_ab_idx on skipscan_t
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Unique
+   ->  Index Only Scan Backward using skipscan_t_ab_idx on skipscan_t
    Skip Atts: 1 (walk)
-(2 rows)
+(3 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t
   ORDER BY a, b;
-                    QUERY PLAN                    
---------------------------------------------------
- Index Scan using skipscan_t_ab_idx on skipscan_t
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Unique
+   ->  Index Scan using skipscan_t_ab_idx on skipscan_t
    Skip Atts: 1 (descend)
-(2 rows)
+(3 rows)
 
 EXPLAIN (COSTS OFF) SELECT a, count(*) FROM skipscan_t GROUP BY a;
           QUERY PLAN          

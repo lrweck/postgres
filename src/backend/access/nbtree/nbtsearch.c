@@ -1911,6 +1911,15 @@ _bt_looseskip(IndexScanDesc scan)
 	if (so->nskipatts <= 0 || !BTScanPosIsValid(so->currPos))
 		return false;
 
+	/*
+	 * A loose scan deliberately does not visit the heap pages of the skipped
+	 * entries, so it cannot take the predicate locks SSI needs.  Fall back to
+	 * a normal scan there; the Unique/Group node above the scan is still in
+	 * the plan, so correctness does not depend on the skip.
+	 */
+	if (IsolationIsSerializable())
+		return false;
+
 	/* btrescan() keeps the leaf page pinned when a loose scan is requested */
 	Assert(BTScanPosIsPinned(so->currPos));
 	Assert(so->currPos.itemIndex >= so->currPos.firstItem);
@@ -1953,6 +1962,12 @@ _bt_looseskip(IndexScanDesc scan)
 	 * and are advanced by _bt_checkkeys while pages are read.  A re-descent
 	 * can jump past states they have not reached, so only use it for plain
 	 * scans.  The leaf walk is always safe.
+	 */
+	/*
+	 * Under SERIALIZABLE, a re-descent skips leaf pages with no predicate
+	 * lock.  An insert of a new value in the gap between two groups can then
+	 * land on an unlocked page, hiding a phantom.  The leaf walk locks every
+	 * page it looks at, so use it there.
 	 */
 	if (so->skipdescend && so->numArrayKeys == 0)
 	{

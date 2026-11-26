@@ -32,6 +32,7 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "catalog/pg_am.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
@@ -120,8 +121,10 @@ IndexNext(IndexScanState *node)
 
 		node->iss_ScanDesc = scandesc;
 
-		scandesc->xs_num_skip_atts = node->iss_NumSkipAtts;
-		scandesc->xs_skip_descend = node->iss_SkipDescend;
+		scandesc->xs_num_skip_atts = node->ss.ss_SkipSupported ?
+			node->iss_NumSkipAtts : 0;
+		scandesc->xs_skip_descend = node->ss.ss_SkipSupported ?
+			node->iss_SkipDescend : false;
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -947,7 +950,8 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 
 	indexstate->iss_NumSkipAtts = node->indexskipatts;
 	indexstate->iss_SkipDescend = node->indexskipdescend;
-	indexstate->ss.ss_SkipSupported = (node->indexskipatts > 0);
+	indexstate->ss.ss_SkipSupported =
+		(node->indexskipatts > 0 && !IsolationIsSerializable());
 	indexstate->ss.ss_SkipPending = false;
 	indexstate->ss.ss_SkipDirection = NoMovementScanDirection;
 
