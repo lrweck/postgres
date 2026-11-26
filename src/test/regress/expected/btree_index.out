@@ -551,8 +551,9 @@ select distinct hundred from tenk1 where hundred in (47, 48, 72, 82);
 ------------------------------------------------------------------
  Unique
    ->  Index Only Scan using tenk1_hundred on tenk1
+   Skip Atts: 1 (walk)
          Index Cond: (hundred = ANY ('{47,48,72,82}'::integer[]))
-(3 rows)
+(4 rows)
 
 select distinct hundred from tenk1 where hundred in (47, 48, 72, 82);
  hundred 
@@ -569,8 +570,9 @@ select distinct hundred from tenk1 where hundred in (47, 48, 72, 82) order by hu
 ------------------------------------------------------------------
  Unique
    ->  Index Only Scan Backward using tenk1_hundred on tenk1
+   Skip Atts: 1 (walk)
          Index Cond: (hundred = ANY ('{47,48,72,82}'::integer[]))
-(3 rows)
+(4 rows)
 
 select distinct hundred from tenk1 where hundred in (47, 48, 72, 82) order by hundred desc;
  hundred 

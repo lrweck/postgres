@@ -37,6 +37,16 @@ extern RelOptInfo *query_planner(PlannerInfo *root,
 extern void preprocess_minmax_aggregates(PlannerInfo *root);
 
 /*
+ * prototypes for plan/planner.c
+ */
+extern IndexPath *make_loose_scan_path(PlannerInfo *root,
+									   RelOptInfo *input_rel,
+									   Path *path,
+									   List *loosepathkeys,
+									   double numGroups,
+									   List *required_pathkeys);
+
+/*
  * prototypes for plan/createplan.c
  */
 extern Plan *create_plan(PlannerInfo *root, Path *best_path);

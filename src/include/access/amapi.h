@@ -56,6 +56,7 @@ typedef enum IndexAMProperty
 	AMPROP_CAN_MULTI_COL,
 	AMPROP_CAN_EXCLUDE,
 	AMPROP_CAN_INCLUDE,
+	AMPROP_CAN_SKIP_SCAN,
 } IndexAMProperty;
 
 /*
@@ -203,6 +204,9 @@ typedef bool (*amgettuple_function) (IndexScanDesc scan,
 typedef int64 (*amgetbitmap_function) (IndexScanDesc scan,
 									   TIDBitmap *tbm);
 
+/* advance past the rest of the current DISTINCT group */
+typedef bool (*amskipscan_function) (IndexScanDesc scan);
+
 /* end index scan */
 typedef void (*amendscan_function) (IndexScanDesc scan);
 
@@ -271,6 +275,8 @@ typedef struct IndexAmRoutine
 	bool		amclusterable;
 	/* does AM handle predicate locks? */
 	bool		ampredlocks;
+	/* does AM support loose (skip) scans for DISTINCT/GROUP BY? */
+	bool		amcanskipscan;
 	/* does AM support parallel scan? */
 	bool		amcanparallel;
 	/* does AM support parallel build? */
@@ -311,6 +317,7 @@ typedef struct IndexAmRoutine
 	amrescan_function amrescan;
 	amgettuple_function amgettuple; /* can be NULL */
 	amgetbitmap_function amgetbitmap;	/* can be NULL */
+	amskipscan_function amskipscan; /* can be NULL */
 	amendscan_function amendscan;
 	ammarkpos_function ammarkpos;	/* can be NULL */
 	amrestrpos_function amrestrpos; /* can be NULL */

@@ -1,0 +1,334 @@
+--
+-- Loose (skip) index scans
+--
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE skipscan_t (a int, b int, c text);
+INSERT INTO skipscan_t
+  SELECT g % 100, (g / 100) % 10, 'x' FROM generate_series(1, 200000) g;
+CREATE INDEX skipscan_t_a_idx ON skipscan_t (a);
+CREATE INDEX skipscan_t_ab_idx ON skipscan_t (a, b);
+CREATE INDEX skipscan_t_ab_desc_idx ON skipscan_t (a, b DESC NULLS LAST);
+VACUUM ANALYZE skipscan_t;
+-- baseline plan
+SET enable_skipscan = off;
+EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: a
+   ->  Seq Scan on skipscan_t
+(3 rows)
+
+-- loose plans
+SET enable_skipscan = on;
+EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM skipscan_t;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT a FROM skipscan_t GROUP BY a;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Group
+   Group Key: a
+   ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT DISTINCT a, b FROM skipscan_t;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
+   Skip Atts: 2 (walk)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t ORDER BY a, b;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Unique
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(3 rows)
+
+SELECT count(*) FROM (SELECT DISTINCT b FROM skipscan_t WHERE a = 1) s;
+ count 
+-------
+    10
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t
+  ORDER BY a DESC, b DESC;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Unique
+   ->  Index Only Scan Backward using skipscan_t_ab_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t
+  ORDER BY a, b;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Unique
+   ->  Index Scan using skipscan_t_ab_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT a, min(b) FROM skipscan_t GROUP BY a;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ GroupAggregate
+   Group Key: a
+   ->  Index Only Scan using skipscan_t_ab_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT a, max(b) FROM skipscan_t GROUP BY a;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ GroupAggregate
+   Group Key: a
+   ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT a, count(*) FROM skipscan_t GROUP BY a;
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: a
+   ->  Seq Scan on skipscan_t
+(3 rows)
+
+-- results
+SELECT count(*) FROM (SELECT DISTINCT a FROM skipscan_t) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, b FROM skipscan_t GROUP BY a, b) s;
+ count 
+-------
+  1000
+(1 row)
+
+SELECT count(*) FROM (SELECT DISTINCT ON (a) a, b FROM skipscan_t
+                      ORDER BY a, b) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT DISTINCT ON (a) a, b FROM skipscan_t
+                      ORDER BY a DESC, b DESC) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, count(*) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, min(b) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, max(b) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a, min(b), max(b) FROM skipscan_t GROUP BY a) s;
+ count 
+-------
+   100
+(1 row)
+
+-- on/off comparison
+SET enable_skipscan = off;
+CREATE TEMP TABLE skipscan_ref AS SELECT DISTINCT a FROM skipscan_t;
+CREATE TEMP TABLE skipscan_ref_bw AS
+  SELECT DISTINCT ON (a) a, b FROM skipscan_t ORDER BY a DESC, b DESC;
+SET enable_skipscan = on;
+SELECT count(*) FROM
+  ((SELECT DISTINCT a FROM skipscan_t EXCEPT SELECT * FROM skipscan_ref)
+   UNION ALL
+   (SELECT * FROM skipscan_ref EXCEPT SELECT DISTINCT a FROM skipscan_t)) s;
+ count 
+-------
+     0
+(1 row)
+
+SELECT count(*) FROM
+  ((SELECT DISTINCT ON (a) a, b FROM skipscan_t ORDER BY a DESC, b DESC
+    EXCEPT SELECT * FROM skipscan_ref_bw)
+   UNION ALL
+   (SELECT * FROM skipscan_ref_bw
+    EXCEPT SELECT DISTINCT ON (a) a, b FROM skipscan_t
+           ORDER BY a DESC, b DESC)) s;
+ERROR:  syntax error at or near "EXCEPT"
+LINE 3:     EXCEPT SELECT * FROM skipscan_ref_bw)
+            ^
+-- a qpqual must not lose rows (forced onto the index path)
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT count(*) FROM (SELECT DISTINCT a FROM skipscan_t WHERE b % 2 = 0) s;
+ count 
+-------
+   100
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+-- A plain DISTINCT above a semi/anti join makes the outer side's duplicates
+-- irrelevant, so the join can be evaluated once per loose-scan group.
+CREATE TABLE skipscan_s (a int);
+INSERT INTO skipscan_s SELECT g % 30 FROM generate_series(1, 60) g;
+CREATE INDEX skipscan_s_a_idx ON skipscan_s (a);
+VACUUM ANALYZE skipscan_s;
+EXPLAIN (COSTS OFF)
+  SELECT DISTINCT a FROM skipscan_t WHERE a IN (SELECT a FROM skipscan_s);
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: skipscan_t.a
+         ->  Hash Semi Join
+               Hash Cond: (skipscan_t.a = skipscan_s.a)
+               ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+               ->  Hash
+                     ->  Seq Scan on skipscan_s
+(9 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT DISTINCT a FROM skipscan_t
+   WHERE EXISTS (SELECT 1 FROM skipscan_s WHERE skipscan_s.a = skipscan_t.a);
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: skipscan_t.a
+         ->  Hash Semi Join
+               Hash Cond: (skipscan_t.a = skipscan_s.a)
+               ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+               ->  Hash
+                     ->  Seq Scan on skipscan_s
+(9 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT DISTINCT a FROM skipscan_t
+   WHERE NOT EXISTS (SELECT 1 FROM skipscan_s
+                     WHERE skipscan_s.a = skipscan_t.a);
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ HashAggregate
+   Group Key: skipscan_t.a
+   ->  Hash Anti Join
+         Hash Cond: (skipscan_t.a = skipscan_s.a)
+         ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+   Skip Atts: 1 (walk)
+         ->  Hash
+               ->  Seq Scan on skipscan_s
+(8 rows)
+
+-- These need the rows the loose scan drops, so they must not use it.
+EXPLAIN (COSTS OFF)
+  SELECT DISTINCT ON (a) a FROM skipscan_t
+   WHERE a IN (SELECT a FROM skipscan_s) ORDER BY a;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Unique
+   ->  Merge Join
+         Merge Cond: (skipscan_t.a = skipscan_s.a)
+         ->  Index Only Scan using skipscan_t_ab_desc_idx on skipscan_t
+         ->  Sort
+               Sort Key: skipscan_s.a
+               ->  HashAggregate
+                     Group Key: skipscan_s.a
+                     ->  Seq Scan on skipscan_s
+(9 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT DISTINCT skipscan_t FROM skipscan_t
+   WHERE a IN (SELECT a FROM skipscan_s);
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ HashAggregate
+   Group Key: skipscan_t.*
+   ->  Merge Join
+         Merge Cond: (skipscan_t.a = skipscan_s.a)
+         ->  Index Scan using skipscan_t_ab_desc_idx on skipscan_t
+         ->  Sort
+               Sort Key: skipscan_s.a
+               ->  HashAggregate
+                     Group Key: skipscan_s.a
+                     ->  Seq Scan on skipscan_s
+(10 rows)
+
+-- results
+SELECT count(*) FROM (SELECT DISTINCT a FROM skipscan_t
+                       WHERE a IN (SELECT a FROM skipscan_s)) s;
+ count 
+-------
+    30
+(1 row)
+
+SELECT count(*) FROM (SELECT DISTINCT a FROM skipscan_t
+                       WHERE NOT EXISTS (SELECT 1 FROM skipscan_s
+                                         WHERE skipscan_s.a = skipscan_t.a)) s;
+ count 
+-------
+    70
+(1 row)
+
+-- on/off comparison
+SET enable_skipscan = off;
+CREATE TEMP TABLE skipscan_ref_in AS
+  SELECT DISTINCT a FROM skipscan_t WHERE a IN (SELECT a FROM skipscan_s);
+CREATE TEMP TABLE skipscan_ref_anti AS
+  SELECT DISTINCT a FROM skipscan_t
+   WHERE NOT EXISTS (SELECT 1 FROM skipscan_s
+                     WHERE skipscan_s.a = skipscan_t.a);
+SET enable_skipscan = on;
+SELECT count(*) FROM
+  ((SELECT DISTINCT a FROM skipscan_t WHERE a IN (SELECT a FROM skipscan_s)
+    EXCEPT SELECT * FROM skipscan_ref_in)
+   UNION ALL
+   (SELECT * FROM skipscan_ref_in
+    EXCEPT SELECT DISTINCT a FROM skipscan_t
+           WHERE a IN (SELECT a FROM skipscan_s))) s;
+ count 
+-------
+     0
+(1 row)
+
+SELECT count(*) FROM
+  ((SELECT DISTINCT a FROM skipscan_t
+     WHERE NOT EXISTS (SELECT 1 FROM skipscan_s
+                       WHERE skipscan_s.a = skipscan_t.a)
+    EXCEPT SELECT * FROM skipscan_ref_anti)
+   UNION ALL
+   (SELECT * FROM skipscan_ref_anti
+    EXCEPT SELECT DISTINCT a FROM skipscan_t
+           WHERE NOT EXISTS (SELECT 1 FROM skipscan_s
+                             WHERE skipscan_s.a = skipscan_t.a))) s;
+ count 
+-------
+     0
+(1 row)
+
+DROP TABLE skipscan_s;
+DROP TABLE skipscan_t;

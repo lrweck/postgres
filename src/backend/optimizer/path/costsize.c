@@ -146,6 +146,7 @@ int			max_parallel_workers_per_gather = 2;
 bool		enable_seqscan = true;
 bool		enable_indexscan = true;
 bool		enable_indexonlyscan = true;
+bool		enable_skipscan = true;
 bool		enable_bitmapscan = true;
 bool		enable_tidscan = true;
 bool		enable_sort = true;
@@ -817,6 +818,171 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 	run_cost += cpu_run_cost;
 
+	path->path.startup_cost = startup_cost;
+	path->path.total_cost = startup_cost + run_cost;
+}
+
+/*
+ * cost_skipscan_index
+ *	  Cost a loose (skip) scan of a btree index.
+ *
+ * A loose scan returns one row per group of distinct leading-column values.
+ * To reach the next group, nbtree either re-descends the tree (one random
+ * leaf page per group, plus cached internal pages) or keeps walking the leaf
+ * level (every page in the scanned range, but in leaf order).  The walk's
+ * pages are sequential: one random page for the initial positioning, then
+ * spc_seq_page_cost for the rest of the level.  On top of that the scan pays
+ * one index tuple, one qual evaluation, and one heap/VM visit per tuple it
+ * actually examines.
+ *
+ * The caller has already costed the ordinary index path; we overwrite rows,
+ * indexselectivity, and the cost fields of this (copied) path.
+ */
+void
+cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
+					int nskipatts, bool *descend)
+{
+	RelOptInfo *baserel = path->path.parent;
+	IndexOptInfo *index = path->indexinfo;
+	double		index_pages = (double) index->pages;
+	double		spc_random_page_cost;
+	double		spc_seq_page_cost;
+	double		walk_pages;
+	double		walk_io;
+	double		cpu_per_group;
+	double		search_cpu;
+	double		index_rows;
+	double		pass_sel;
+	double		rows_per_group;
+	double		scanned;
+	Cost		startup_cost;
+	Cost		walk_cost;
+	Cost		descend_cost;
+	Cost		run_cost;
+
+	Assert(IsA(baserel, RelOptInfo));
+	Assert(nskipatts > 0);
+	Assert(numGroups > 0);
+
+	if (index_pages < 1.0)
+		index_pages = 1.0;
+
+	numGroups = clamp_row_est(numGroups);
+
+	get_tablespace_page_costs(baserel->reltablespace,
+							  &spc_random_page_cost,
+							  &spc_seq_page_cost);
+
+	/*
+	 * Two ways to get to the next group:
+	 *
+	 * walk: keep the scan on the leaf level and follow btpo_next, comparing
+	 * high keys.  The leaf level is a linked list, so this visits (but does
+	 * not process) every page in the scanned range, in leaf order.
+	 *
+	 * descend: search the tree for the first tuple greater than the current
+	 * group key.  That is tree_height internal page visits plus one random
+	 * leaf page per group, but no walk through unrelated leaves.
+	 *
+	 * Internal pages are usually cached, so charge them at cpu_operator_cost
+	 * and only the leaf at random_page_cost.  Pick the cheaper one.
+	 */
+	walk_pages = Max(1.0, path->indexselectivity * index_pages);
+	walk_pages = Min(index_pages, walk_pages);
+
+	/*
+	 * Keep the ordinary index path's startup cost: the loose scan descends to
+	 * its first leaf the same way, and baserestrictcost.startup is already
+	 * included there.
+	 */
+	startup_cost = path->path.startup_cost;
+	cpu_per_group = cpu_index_tuple_cost +
+		baserel->baserestrictcost.per_tuple +
+		cpu_tuple_cost;
+
+	/*
+	 * Finding the next group costs more than returning its first tuple: the
+	 * AM builds a comparison key from the current tuple and binary-searches
+	 * the leaf page (plus, when re-descending, the tree path).  Charge the
+	 * in-page binary search plus a fixed overhead for building the key and
+	 * pinning the metapage, about three tuple costs' worth.  Otherwise the
+	 * model says a group is nearly free once the pages are read, and the loose
+	 * scan keeps winning long after a full index scan or a seqscan is cheaper.
+	 */
+	if (index->tuples > 0 && index_pages > 0)
+		search_cpu = cpu_operator_cost *
+			ceil(log(Max(2.0, index->tuples / index_pages)) / log(2.0));
+	else
+		search_cpu = cpu_operator_cost;
+	search_cpu += 3.0 * cpu_tuple_cost;
+
+	/*
+	 * If the scan still has qpquals, a group may need several entries before
+	 * one passes.  Estimate how many entries we actually look at: the pass
+	 * fraction is rows-after-all-quals / rows-after-index-quals, and a group
+	 * has index_rows / numGroups entries on average.
+	 */
+	if (index->tuples > 0)
+		index_rows = index->tuples * path->indexselectivity;
+	else
+		index_rows = baserel->tuples * path->indexselectivity;
+	pass_sel = 1.0;
+	rows_per_group = 1.0;
+	if (index_rows > 0.0 && numGroups > 0.0)
+	{
+		pass_sel = path->path.rows / index_rows;
+		pass_sel = Max(pass_sel, 1e-6);
+		pass_sel = Min(pass_sel, 1.0);
+		rows_per_group = index_rows / numGroups;
+		/*
+		 * With qpquals we cannot know where in the group the first passing
+		 * entry is: the filter may be correlated with the index order.  Be
+		 * conservative and charge the whole group; the loose scan then only
+		 * wins when a full index scan is cheaper than the alternatives.
+		 */
+		if (pass_sel >= 1.0)
+			rows_per_group = Min(rows_per_group, 1.0);
+		rows_per_group = Max(rows_per_group, 1.0);
+	}
+	scanned = numGroups * rows_per_group;
+	if (index_rows > 0.0)
+		scanned = Min(scanned, index_rows);
+
+	/*
+	 * The walk reads the scanned range in leaf order: the initial page is a
+	 * random read, the rest are sequential.  Charging every leaf page at
+	 * random_page_cost would make the walk look as expensive as one random
+	 * seek per page, which it is not.
+	 */
+	walk_io = spc_random_page_cost +
+		Max(0.0, walk_pages - 1.0) * spc_seq_page_cost;
+
+	walk_cost = walk_io +
+		scanned * cpu_per_group +
+		numGroups * search_cpu;
+	descend_cost = numGroups * spc_random_page_cost +
+		numGroups * Max(1, index->tree_height) * cpu_operator_cost +
+		scanned * cpu_per_group +
+		numGroups * search_cpu;
+
+	*descend = (descend_cost < walk_cost);
+	run_cost = *descend ? descend_cost : walk_cost;
+
+	/*
+	 * Heap access: a plain scan fetches every entry it examines; an
+	 * index-only scan still consults the VM for each one.
+	 */
+	if (path->path.pathtype != T_IndexOnlyScan)
+		run_cost += scanned * spc_random_page_cost;
+	else
+		run_cost += scanned * (1.0 - baserel->allvisfrac) *
+			spc_random_page_cost;
+
+	path->path.rows = numGroups;
+	path->indexselectivity = Min(1.0,
+								 numGroups /
+								 Max(1.0, index->tuples > 0 ?
+									 (double) index->tuples : baserel->tuples));
 	path->path.startup_cost = startup_cost;
 	path->path.total_cost = startup_cost + run_cost;
 }

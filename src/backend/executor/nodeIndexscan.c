@@ -32,6 +32,7 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "catalog/pg_am.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
@@ -120,6 +121,9 @@ IndexNext(IndexScanState *node)
 
 		node->iss_ScanDesc = scandesc;
 
+		scandesc->xs_num_skip_atts = node->iss_NumSkipAtts;
+		scandesc->xs_skip_descend = node->iss_SkipDescend;
+
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
 		 * pass the scankeys to the index AM.
@@ -128,6 +132,19 @@ IndexNext(IndexScanState *node)
 			index_rescan(scandesc,
 						 node->iss_ScanKeys, node->iss_NumScanKeys,
 						 node->iss_OrderByKeys, node->iss_NumOrderByKeys);
+	}
+
+	/*
+	 * If the previous tuple was accepted, advance past the rest of its group
+	 * before fetching the next tuple.  Deferred to here so the previous result
+	 * slot is no longer in use.
+	 */
+	if (node->ss.ss_SkipPending)
+	{
+		node->ss.ss_SkipPending = false;
+		if (!scandesc->xs_heap_continue &&
+			direction == node->ss.ss_SkipDirection)
+			(void) index_skip_group(scandesc);
 	}
 
 	/*
@@ -152,6 +169,7 @@ IndexNext(IndexScanState *node)
 			}
 		}
 
+		node->ss.ss_SkipDirection = direction;
 		return slot;
 	}
 
@@ -589,6 +607,7 @@ ExecReScanIndexScan(IndexScanState *node)
 	}
 
 	/* reset index scan */
+	node->ss.ss_SkipPending = false;
 	if (node->iss_ScanDesc)
 		index_rescan(node->iss_ScanDesc,
 					 node->iss_ScanKeys, node->iss_NumScanKeys,
@@ -926,6 +945,12 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
 	indexstate->ss.ps.ExecProcNode = ExecIndexScan;
+
+	indexstate->iss_NumSkipAtts = node->indexskipatts;
+	indexstate->iss_SkipDescend = node->indexskipdescend;
+	indexstate->ss.ss_SkipSupported = (node->indexskipatts > 0);
+	indexstate->ss.ss_SkipPending = false;
+	indexstate->ss.ss_SkipDirection = NoMovementScanDirection;
 
 	/*
 	 * Miscellaneous initialization

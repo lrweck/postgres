@@ -978,6 +978,24 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 		result = lappend(result, ipath);
 
 		/*
+		 * Keep a copy of the forward path as a loose-scan candidate.  It has
+		 * to live outside rel->pathlist: add_path() may discard it in favor of
+		 * a same-ordering path on another index, and the loose scan must be
+		 * able to inspect this index's own clauses and scan direction.
+		 */
+		if (scantype != ST_BITMAPSCAN &&
+			(root->distinct_pathkeys != NIL ||
+			 root->group_pathkeys != NIL))
+		{
+			IndexPath  *loose_path;
+
+			loose_path = palloc(sizeof(IndexPath));
+			memcpy(loose_path, ipath, sizeof(IndexPath));
+			rel->loose_pathlist = lappend(rel->loose_pathlist, loose_path);
+		}
+
+
+		/*
 		 * If appropriate, consider parallel index scan.  We don't allow
 		 * parallel index scan for bitmap index scans.
 		 */
@@ -1029,6 +1047,21 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  loop_count,
 									  false);
 			result = lappend(result, ipath);
+
+			/*
+			 * Keep the backward path too: a loose scan can walk or re-descend
+			 * in the backward direction.
+			 */
+			if (scantype != ST_BITMAPSCAN &&
+				(root->distinct_pathkeys != NIL ||
+				 root->group_pathkeys != NIL))
+			{
+				IndexPath  *loose_path;
+
+				loose_path = palloc(sizeof(IndexPath));
+				memcpy(loose_path, ipath, sizeof(IndexPath));
+				rel->loose_pathlist = lappend(rel->loose_pathlist, loose_path);
+			}
 
 			/* If appropriate, consider parallel index scan */
 			if (index->amcanparallel &&

@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "access/sysattr.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
 #include "nodes/nodeFuncs.h"
@@ -25,6 +26,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/lsyscache.h"
+#include "utils/selfuncs.h"
 #include "utils/typcache.h"
 
 /* Hooks for plugins to get control in add_paths_to_joinrel() */
@@ -76,7 +78,11 @@ static void consider_parallel_mergejoin(PlannerInfo *root,
 										Path *inner_cheapest_total);
 static void hash_inner_and_outer(PlannerInfo *root, RelOptInfo *joinrel,
 								 RelOptInfo *outerrel, RelOptInfo *innerrel,
-								 JoinType jointype, JoinPathExtraData *extra);
+								 JoinType jointype, JoinType orig_jointype,
+								 JoinPathExtraData *extra);
+static bool loose_semijoin_safe(PlannerInfo *root, RelOptInfo *joinrel,
+								RelOptInfo *outerrel, IndexPath *loose,
+								List *restrictlist);
 static List *select_mergejoin_clauses(PlannerInfo *root,
 									  RelOptInfo *joinrel,
 									  RelOptInfo *outerrel,
@@ -381,7 +387,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 	 */
 	if ((extra.pgs_mask & PGS_HASHJOIN) != 0 || jointype == JOIN_FULL)
 		hash_inner_and_outer(root, joinrel, outerrel, innerrel,
-							 jointype, &extra);
+							 jointype, save_jointype, &extra);
 
 	/*
 	 * 5. If inner and outer relations are foreign tables (or joins) belonging
@@ -1433,7 +1439,8 @@ try_hashjoin_path(PlannerInfo *root,
 				  Path *inner_path,
 				  List *hashclauses,
 				  JoinType jointype,
-				  JoinPathExtraData *extra)
+				  JoinPathExtraData *extra,
+				  double row_scale)
 {
 	Relids		required_outer;
 	JoinCostWorkspace workspace;
@@ -1476,18 +1483,30 @@ try_hashjoin_path(PlannerInfo *root,
 						  workspace.startup_cost, workspace.total_cost,
 						  NIL, required_outer))
 	{
-		add_path(joinrel, (Path *)
-				 create_hashjoin_path(root,
-									  joinrel,
-									  jointype,
-									  &workspace,
-									  extra,
-									  outer_path,
-									  inner_path,
-									  false,	/* parallel_hash */
-									  extra->restrictlist,
-									  required_outer,
-									  hashclauses));
+		Path	   *path;
+
+		path = (Path *)
+			create_hashjoin_path(root,
+								 joinrel,
+								 jointype,
+								 &workspace,
+								 extra,
+								 outer_path,
+								 inner_path,
+								 false, /* parallel_hash */
+								 extra->restrictlist,
+								 required_outer,
+								 hashclauses);
+
+		/*
+		 * A loose outer path emits only a fraction of the outer relation's
+		 * estimated rows, but final_cost_hashjoin() sizes the join from the
+		 * relation.  Scale the result so upper nodes are costed correctly.
+		 */
+		if (row_scale > 0)
+			path->rows = clamp_row_est(path->rows * row_scale);
+
+		add_path(joinrel, path);
 	}
 	else
 	{
@@ -2345,6 +2364,7 @@ hash_inner_and_outer(PlannerInfo *root,
 					 RelOptInfo *outerrel,
 					 RelOptInfo *innerrel,
 					 JoinType jointype,
+					 JoinType orig_jointype,
 					 JoinPathExtraData *extra)
 {
 	bool		isouterjoin = IS_OUTER_JOIN(jointype);
@@ -2436,7 +2456,8 @@ hash_inner_and_outer(PlannerInfo *root,
 							  cheapest_total_inner,
 							  hashclauses,
 							  jointype,
-							  extra);
+							  extra,
+							  0.0);
 
 		foreach(lc1, outerrel->cheapest_parameterized_paths)
 		{
@@ -2470,7 +2491,59 @@ hash_inner_and_outer(PlannerInfo *root,
 								  innerpath,
 								  hashclauses,
 								  jointype,
-								  extra);
+								  extra,
+								  0.0);
+			}
+		}
+
+		/*
+		 * A plain DISTINCT above a semi/anti join collapses each group of
+		 * outer rows that share the DISTINCT keys, so the join only needs one
+		 * representative outer row per group.  A loose (skip) scan produces
+		 * exactly that, and can be dramatically cheaper than scanning every
+		 * outer row.  loose_semijoin_safe() checks that the join and the
+		 * columns needed above it only depend on the columns the loose scan
+		 * keeps distinct.
+		 *
+		 * JOIN_UNIQUE_INNER is how a semi join with a unique-ified inner side
+		 * is planned; the outer side is still the semi join's LHS.
+		 */
+		if (enable_skipscan &&
+			(orig_jointype == JOIN_SEMI || orig_jointype == JOIN_ANTI ||
+			 orig_jointype == JOIN_UNIQUE_INNER) &&
+			root->distinct_pathkeys != NIL &&
+			outerrel->loose_pathlist != NIL)
+		{
+			Query	   *parse = root->parse;
+			List	   *distinct_exprs;
+			ListCell   *lc;
+
+			distinct_exprs = get_sortgrouplist_exprs(root->processed_distinctClause,
+													 parse->targetList);
+
+			foreach(lc, outerrel->loose_pathlist)
+			{
+				Path	   *loose_path = (Path *) lfirst(lc);
+				double		numGroups;
+				IndexPath  *skip;
+
+				numGroups = estimate_num_groups(root, distinct_exprs,
+												loose_path->rows,
+												NULL, NULL);
+				skip = make_loose_scan_path(root, outerrel, loose_path,
+											root->distinct_pathkeys,
+											numGroups,
+											root->distinct_pathkeys);
+				if (skip == NULL)
+					continue;
+				if (!loose_semijoin_safe(root, joinrel, outerrel, skip,
+										 extra->restrictlist))
+					continue;
+
+				try_hashjoin_path(root, joinrel, (Path *) skip,
+								  cheapest_total_inner,
+								  hashclauses, jointype, extra,
+								  outerrel->rows > 0 ? numGroups / outerrel->rows : 0.0);
 			}
 		}
 
@@ -2542,6 +2615,126 @@ hash_inner_and_outer(PlannerInfo *root,
 										  false /* parallel_hash */ );
 		}
 	}
+}
+
+/*
+ * loose_semijoin_safe
+ *		Is a loose scan of outerrel a sound stand-in for its full scan in a
+ *		semi/anti join that a plain DISTINCT above the join deduplicates?
+ *
+ * A loose scan emits one row per distinct combination of the first
+ * indexskipatts index columns.  The join above it therefore tests one
+ * representative row per group instead of every outer row, and its output has
+ * at most one row per group that has a match.  That matches the original
+ * DISTINCT output only when:
+ *
+ *	- the query is a plain DISTINCT: no DISTINCT ON, grouping, aggregate or
+ *	  window semantics that would need the rows we drop;
+ *	- every DISTINCT key is a plain Var of outerrel among the columns the
+ *	  loose scan keeps distinct, so the DISTINCT only collapses duplicates we
+ *	  could safely drop;
+ *	- every Var of outerrel used in the join clauses, or needed above the
+ *	  join, is among those columns too, so the join is tested on accurate
+ *	  values and no later join depends on a row we dropped;
+ *	- the join clauses are not volatile.
+ *
+ * Only plain baserels are accepted: RELOPT_OTHER_MEMBER_REL would need the
+ * child-to-parent Var mapping, and a loose path never exists for an appendrel
+ * parent.
+ */
+static bool
+loose_semijoin_safe(PlannerInfo *root, RelOptInfo *joinrel,
+					RelOptInfo *outerrel, IndexPath *loose,
+					List *restrictlist)
+{
+	Query	   *parse = root->parse;
+	IndexOptInfo *index = loose->indexinfo;
+	Bitmapset  *safe = NULL;
+	Bitmapset  *needed = NULL;
+	ListCell   *lc;
+	int			i;
+	bool		result = false;
+
+	if (parse->hasDistinctOn || parse->groupClause || parse->groupingSets ||
+		parse->hasAggs || parse->hasWindowFuncs || parse->hasTargetSRFs ||
+		root->hasHavingQual)
+		return false;
+
+	if (outerrel->reloptkind != RELOPT_BASEREL ||
+		bms_membership(outerrel->relids) != BMS_SINGLETON)
+		return false;
+
+	if (contain_volatile_functions((Node *) restrictlist))
+		return false;
+
+	/*
+	 * The loose scan compares index tuples, so an expression column has no
+	 * Var we could match against the query's target.  Only plain attributes.
+	 */
+	for (i = 0; i < loose->indexskipatts; i++)
+	{
+		if (index->indexkeys[i] <= 0)
+			goto done;
+		/* same encoding as pull_varattnos() so the sets compare directly */
+		safe = bms_add_member(safe,
+							  index->indexkeys[i] -
+							  FirstLowInvalidHeapAttributeNumber);
+	}
+
+	/*
+	 * Every DISTINCT key must be a plain Var of outerrel, in a column that
+	 * the loose scan keeps distinct.  Other members of the pathkey's
+	 * equivalence class (e.g. the inner side of the join clause) do not
+	 * matter: their values are equal to the outer Var's on a match.
+	 */
+	foreach(lc, root->distinct_pathkeys)
+	{
+		PathKey    *pk = lfirst_node(PathKey, lc);
+		bool		found = false;
+		ListCell   *lc2;
+
+		foreach(lc2, pk->pk_eclass->ec_members)
+		{
+			EquivalenceMember *em = lfirst_node(EquivalenceMember, lc2);
+
+			if (em->em_is_const)
+				continue;
+			if (!bms_is_subset(em->em_relids, outerrel->relids))
+				continue;
+			if (!IsA(em->em_expr, Var) ||
+				!bms_is_member(((Var *) em->em_expr)->varattno -
+							   FirstLowInvalidHeapAttributeNumber, safe))
+				goto done;
+			found = true;
+		}
+		if (!found)
+			goto done;
+	}
+
+	/* Vars needed above the join must be kept accurate too */
+	pull_varattnos((Node *) joinrel->reltarget->exprs, outerrel->relid,
+				   &needed);
+	if (!bms_is_subset(needed, safe))
+		goto done;
+	bms_free(needed);
+	needed = NULL;
+
+	/* ... as must the Vars the join itself evaluates */
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		pull_varattnos((Node *) rinfo->clause, outerrel->relid, &needed);
+	}
+	if (!bms_is_subset(needed, safe))
+		goto done;
+
+	result = true;
+
+done:
+	bms_free(safe);
+	bms_free(needed);
+	return result;
 }
 
 /*

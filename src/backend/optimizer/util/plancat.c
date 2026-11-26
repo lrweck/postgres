@@ -305,6 +305,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 				/* We copy just the fields we need, not all of rd_indam */
 				amroutine = indexRelation->rd_indam;
 				info->amcanorderbyop = amroutine->amcanorderbyop;
+				info->amcanskipscan = amroutine->amcanskipscan;
 				info->amoptionalkey = amroutine->amoptionalkey;
 				info->amsearcharray = amroutine->amsearcharray;
 				info->amsearchnulls = amroutine->amsearchnulls;
