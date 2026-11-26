@@ -139,11 +139,13 @@ SELECT * FROM hash_f8_heap
 EXPLAIN (COSTS OFF)
 SELECT * FROM hash_i4_heap
    WHERE seqno = 9999;
-                       QUERY PLAN                       
---------------------------------------------------------
- Index Scan using hash_i4_partial_index on hash_i4_heap
-   Index Cond: (seqno = 9999)
-(2 rows)
+                    QUERY PLAN                    
+--------------------------------------------------
+ Bitmap Heap Scan on hash_i4_heap
+   Recheck Cond: (seqno = 9999)
+   ->  Bitmap Index Scan on hash_i4_partial_index
+         Index Cond: (seqno = 9999)
+(4 rows)
 
 SELECT * FROM hash_i4_heap
    WHERE seqno = 9999;

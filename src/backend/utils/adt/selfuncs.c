@@ -5161,6 +5161,7 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 		double		reldistinct = 1;
 		double		relmaxndistinct = reldistinct;
 		int			relvarcount = 0;
+		bool		group_on_unique_key = false;
 		List	   *newvarinfos = NIL;
 		List	   *relvarinfos = NIL;
 
@@ -5183,6 +5184,41 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 				/* not time to process varinfo2 yet */
 				newvarinfos = lappend(newvarinfos, varinfo2);
 			}
+		}
+
+		/*
+		 * If the grouping columns are exactly a unique key of the relation,
+		 * every row is already its own group.  The factor-of-ten clamp below
+		 * exists because several grouping columns are usually correlated in
+		 * an unknown way; here the worst case is the truth, and applying the
+		 * clamp invents a reduction that cannot happen.  Measured (DS39): a
+		 * GROUP BY over all three key columns of inventory was predicted to
+		 * shrink tenfold, which made aggregating 11.7M rows before the joins
+		 * look cheaper than joining first.
+		 */
+		if (rel->reloptkind == RELOPT_BASEREL && rel->tuples > 0)
+		{
+			List	   *keyvars = NIL;
+			bool		allvars = true;
+			ListCell   *lc2;
+
+			foreach(lc2, relvarinfos)
+			{
+				GroupVarInfo *varinfo2 = (GroupVarInfo *) lfirst(lc2);
+
+				if (IsA(varinfo2->var, Var) &&
+					((Var *) varinfo2->var)->varattno > 0)
+					keyvars = lappend(keyvars, varinfo2->var);
+				else
+				{
+					allvars = false;
+					break;
+				}
+			}
+			if (allvars)
+				group_on_unique_key =
+					relation_has_unique_key_for(rel, keyvars);
+			list_free(keyvars);
 		}
 
 		/*
@@ -5248,7 +5284,7 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 			 */
 			double		clamp = rel->tuples;
 
-			if (relvarcount > 1)
+			if (relvarcount > 1 && !group_on_unique_key)
 			{
 				clamp *= 0.1;
 				if (clamp < relmaxndistinct)
@@ -7986,24 +8022,6 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 	 */
 	if (vardata->isunique)
 		stadistinct = -1.0 * (1.0 - stanullfrac);
-
-	/*
-	 * A restricted relation cannot yield more distinct values of a column
-	 * than it yields rows.  pg_statistic describes the whole table, so cap
-	 * the estimate by the relation's own size; otherwise a filtered
-	 * dimension offers a domain it does not have, and joins against it come
-	 * out too small.  Skip the cap while the relation size is still unknown.
-	 */
-	if (vardata->rel && vardata->rel->rows > 0.0)
-	{
-		double		relrows = vardata->rel->rows;
-
-		if (stadistinct > 0.0)
-			return clamp_row_est(Min(stadistinct, relrows));
-		if (stadistinct < 0.0)
-			return clamp_row_est(Min(-stadistinct * vardata->rel->tuples,
-									  relrows));
-	}
 
 	/*
 	 * If we had an absolute estimate, use that.

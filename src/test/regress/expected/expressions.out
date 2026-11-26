@@ -183,10 +183,12 @@ explain (verbose, costs off) select * from bpchar_view
   where f1::bpchar = 'foo';
                                                                    QUERY PLAN                                                                   
 ------------------------------------------------------------------------------------------------------------------------------------------------
- Index Scan using bpchar_tbl_f1_key on public.bpchar_tbl
+ Bitmap Heap Scan on public.bpchar_tbl
    Output: bpchar_tbl.f1, (bpchar_tbl.f1)::character(14), (bpchar_tbl.f1)::bpchar, bpchar_tbl.f2, (bpchar_tbl.f2)::character(14), bpchar_tbl.f2
-   Index Cond: ((bpchar_tbl.f1)::bpchar = 'foo'::bpchar)
-(3 rows)
+   Recheck Cond: ((bpchar_tbl.f1)::bpchar = 'foo'::bpchar)
+   ->  Bitmap Index Scan on bpchar_tbl_f1_key
+         Index Cond: ((bpchar_tbl.f1)::bpchar = 'foo'::bpchar)
+(5 rows)
 
 rollback;
 --

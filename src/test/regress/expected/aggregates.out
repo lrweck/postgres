@@ -1339,15 +1339,16 @@ explain (costs off)
   select distinct max(unique2) from tenk1;
                              QUERY PLAN                              
 ---------------------------------------------------------------------
- HashAggregate
-   Group Key: (InitPlan minmax_1).col1
+ Unique
    InitPlan minmax_1
      ->  Limit
            ->  Index Only Scan Backward using tenk1_unique2 on tenk1
                  Index Cond: (unique2 IS NOT NULL)
-   ->  Result
-         Replaces: MinMaxAggregate
-(8 rows)
+   ->  Sort
+         Sort Key: ((InitPlan minmax_1).col1)
+         ->  Result
+               Replaces: MinMaxAggregate
+(9 rows)
 
 select distinct max(unique2) from tenk1;
  max  
@@ -1625,11 +1626,11 @@ create temp table t2 (x int, y int, z int, primary key (x, y));
 create temp table t3 (a int, b int, c int, primary key(a, b) deferrable);
 -- Non-primary-key columns can be removed from GROUP BY
 explain (costs off) select * from t1 group by a,b,c,d;
-      QUERY PLAN      
-----------------------
- HashAggregate
+              QUERY PLAN              
+--------------------------------------
+ Group
    Group Key: a, b
-   ->  Seq Scan on t1
+   ->  Index Scan using t1_pkey on t1
 (3 rows)
 
 -- No removal can happen if the complete PK is not present in GROUP BY
@@ -1645,31 +1646,32 @@ explain (costs off) select a,c from t1 group by a,c,d;
 explain (costs off) select *
 from t1 inner join t2 on t1.a = t2.x and t1.b = t2.y
 group by t1.a,t1.b,t1.c,t1.d,t2.x,t2.y,t2.z;
-                      QUERY PLAN                      
-------------------------------------------------------
- HashAggregate
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Group
    Group Key: t1.a, t1.b
-   ->  Hash Join
-         Hash Cond: ((t2.x = t1.a) AND (t2.y = t1.b))
-         ->  Seq Scan on t2
-         ->  Hash
-               ->  Seq Scan on t1
-(7 rows)
+   ->  Merge Join
+         Merge Cond: ((t1.a = t2.x) AND (t1.b = t2.y))
+         ->  Index Scan using t1_pkey on t1
+         ->  Index Scan using t2_pkey on t2
+(6 rows)
 
 -- Test case where t1 can be optimized but not t2
 explain (costs off) select t1.*,t2.x,t2.z
 from t1 inner join t2 on t1.a = t2.x and t1.b = t2.y
 group by t1.a,t1.b,t1.c,t1.d,t2.x,t2.z;
-                      QUERY PLAN                      
-------------------------------------------------------
- HashAggregate
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Group
    Group Key: t1.a, t1.b, t2.z
-   ->  Hash Join
-         Hash Cond: ((t2.x = t1.a) AND (t2.y = t1.b))
-         ->  Seq Scan on t2
-         ->  Hash
-               ->  Seq Scan on t1
-(7 rows)
+   ->  Sort
+         Sort Key: t1.a, t1.b, t2.z
+         ->  Hash Join
+               Hash Cond: ((t2.x = t1.a) AND (t2.y = t1.b))
+               ->  Seq Scan on t2
+               ->  Hash
+                     ->  Seq Scan on t1
+(9 rows)
 
 -- Cannot optimize when PK is deferrable
 explain (costs off) select * from t3 group by a,b,c;
@@ -1694,12 +1696,14 @@ explain (costs off) select * from t1 group by a,b,c,d;
 
 -- Okay to remove columns if we're only querying the parent.
 explain (costs off) select * from only t1 group by a,b,c,d;
-      QUERY PLAN      
-----------------------
- HashAggregate
+         QUERY PLAN         
+----------------------------
+ Group
    Group Key: a, b
-   ->  Seq Scan on t1
-(3 rows)
+   ->  Sort
+         Sort Key: a, b
+         ->  Seq Scan on t1
+(5 rows)
 
 create temp table p_t1 (
   a int,
@@ -1712,55 +1716,57 @@ create temp table p_t1_1 partition of p_t1 for values in(1);
 create temp table p_t1_2 partition of p_t1 for values in(2);
 -- Ensure we can remove non-PK columns for partitioned tables.
 explain (costs off) select * from p_t1 group by a,b,c,d;
-           QUERY PLAN           
---------------------------------
- HashAggregate
+                     QUERY PLAN                     
+----------------------------------------------------
+ Group
    Group Key: p_t1.a, p_t1.b
    ->  Append
-         ->  Seq Scan on p_t1_1
-         ->  Seq Scan on p_t1_2
+         ->  Index Scan using p_t1_1_pkey on p_t1_1
+         ->  Index Scan using p_t1_2_pkey on p_t1_2
 (5 rows)
 
 create unique index t2_z_uidx on t2(z);
 -- Ensure we don't remove any columns from the GROUP BY for a unique
 -- index on a NULLable column.
 explain (costs off) select y,z from t2 group by y,z;
-      QUERY PLAN      
-----------------------
- HashAggregate
+         QUERY PLAN         
+----------------------------
+ Group
    Group Key: y, z
-   ->  Seq Scan on t2
-(3 rows)
+   ->  Sort
+         Sort Key: y, z
+         ->  Seq Scan on t2
+(5 rows)
 
 -- Make the column NOT NULL and ensure we remove the redundant column
 alter table t2 alter column z set not null;
 explain (costs off) select y,z from t2 group by y,z;
-      QUERY PLAN      
-----------------------
- HashAggregate
+               QUERY PLAN               
+----------------------------------------
+ Group
    Group Key: z
-   ->  Seq Scan on t2
+   ->  Index Scan using t2_z_uidx on t2
 (3 rows)
 
 -- When there are multiple supporting unique indexes and the GROUP BY contains
 -- columns to cover all of those, ensure we pick the index with the least
 -- number of columns so that we can remove more columns from the GROUP BY.
 explain (costs off) select x,y,z from t2 group by x,y,z;
-      QUERY PLAN      
-----------------------
- HashAggregate
+               QUERY PLAN               
+----------------------------------------
+ Group
    Group Key: z
-   ->  Seq Scan on t2
+   ->  Index Scan using t2_z_uidx on t2
 (3 rows)
 
 -- As above but try ordering the columns differently to ensure we get the
 -- same result.
 explain (costs off) select x,y,z from t2 group by z,x,y;
-      QUERY PLAN      
-----------------------
- HashAggregate
+               QUERY PLAN               
+----------------------------------------
+ Group
    Group Key: z
-   ->  Seq Scan on t2
+   ->  Index Scan using t2_z_uidx on t2
 (3 rows)
 
 -- Ensure we don't use a partial index as proof of functional dependency
@@ -1781,11 +1787,11 @@ drop index t2_z_uidx;
 alter table t2 alter column z drop not null;
 create unique index t2_z_uidx on t2(z) nulls not distinct;
 explain (costs off) select y,z from t2 group by y,z;
-      QUERY PLAN      
-----------------------
- HashAggregate
+               QUERY PLAN               
+----------------------------------------
+ Group
    Group Key: z
-   ->  Seq Scan on t2
+   ->  Index Scan using t2_z_uidx on t2
 (3 rows)
 
 -- But not if the table is nullable by an outer join, as null-extended rows
@@ -1800,9 +1806,8 @@ select t2.y,t2.z from t1 left join t2 on true group by t2.y,t2.z;
          ->  Append
                ->  Seq Scan on t1 t1_1
                ->  Seq Scan on t1c t1_2
-         ->  Materialize
-               ->  Seq Scan on t2
-(8 rows)
+         ->  Seq Scan on t2
+(7 rows)
 
 drop table t1 cascade;
 NOTICE:  drop cascades to table t1c
@@ -1889,7 +1894,7 @@ explain (costs off)
 select a, count(*) from t_having group by a having a = row(1.0)::avg_rec;
                QUERY PLAN               
 ----------------------------------------
- GroupAggregate
+ HashAggregate
    ->  Seq Scan on t_having
          Filter: (a = '(1.0)'::avg_rec)
 (3 rows)
@@ -3477,12 +3482,11 @@ SELECT count(*) FROM btg GROUP BY z, y, w, x;
                    QUERY PLAN                    
 -------------------------------------------------
  GroupAggregate
-   Group Key: x, y, z, w
-   ->  Incremental Sort
-         Sort Key: x, y, z, w
-         Presorted Key: x, y
+   Group Key: z, y, w, x
+   ->  Sort
+         Sort Key: z, y, w, x
          ->  Index Scan using btg_x_y_idx on btg
-(6 rows)
+(5 rows)
 
 -- Utilize the ordering of subquery scan to avoid a Sort operation
 EXPLAIN (COSTS OFF) SELECT count(*)
@@ -3508,17 +3512,16 @@ SELECT count(*)
                                QUERY PLAN                                
 -------------------------------------------------------------------------
  GroupAggregate
-   Group Key: t1.x, t1.w, t1.z
+   Group Key: t1.w, t1.z, t1.x
    ->  Merge Join
-         Merge Cond: ((t1.x = t2.x) AND (t1.w = t2.w) AND (t1.z = t2.z))
-         ->  Incremental Sort
-               Sort Key: t1.x, t1.w, t1.z
-               Presorted Key: t1.x
+         Merge Cond: ((t1.w = t2.w) AND (t1.z = t2.z) AND (t1.x = t2.x))
+         ->  Sort
+               Sort Key: t1.w, t1.z, t1.x
                ->  Index Scan using btg_x_y_idx on btg t1
          ->  Sort
-               Sort Key: t2.x, t2.w, t2.z
+               Sort Key: t2.w, t2.z, t2.x
                ->  Index Scan using btg_x_y_idx on btg t2
-(11 rows)
+(10 rows)
 
 RESET enable_nestloop;
 RESET enable_hashjoin;
@@ -3542,12 +3545,11 @@ SELECT count(*) FROM btg GROUP BY w, x, y, z ORDER BY x*x, z;
  Sort
    Sort Key: ((x * x)), z
    ->  GroupAggregate
-         Group Key: x, y, w, z
-         ->  Incremental Sort
-               Sort Key: x, y, w, z
-               Presorted Key: x, y
+         Group Key: w, x, y, z
+         ->  Sort
+               Sort Key: w, x, y, z
                ->  Index Scan using btg_x_y_idx on btg
-(8 rows)
+(7 rows)
 
 -- Test the case where the number of incoming subtree path keys is more than
 -- the number of grouping keys.
@@ -3619,10 +3621,9 @@ GROUP BY c1.y,c1.x,c2.x;
                      QUERY PLAN                      
 -----------------------------------------------------
  Group
-   Group Key: c1.x, c1.y
-   ->  Incremental Sort
-         Sort Key: c1.x, c1.y
-         Presorted Key: c1.x
+   Group Key: c1.y, c1.x
+   ->  Sort
+         Sort Key: c1.y, c1.x
          ->  Merge Join
                Merge Cond: (c1.x = c2.x)
                ->  Sort
@@ -3633,7 +3634,7 @@ GROUP BY c1.y,c1.x,c2.x;
                      Sort Key: c2.x
                      ->  Seq Scan on group_agg_pk c2
                            Disabled: true
-(15 rows)
+(14 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT c1.y,c1.x FROM group_agg_pk c1
@@ -3643,10 +3644,9 @@ GROUP BY c1.y,c2.x,c1.x;
                      QUERY PLAN                      
 -----------------------------------------------------
  Group
-   Group Key: c2.x, c1.y
-   ->  Incremental Sort
-         Sort Key: c2.x, c1.y
-         Presorted Key: c2.x
+   Group Key: c1.y, c2.x
+   ->  Sort
+         Sort Key: c1.y, c2.x
          ->  Merge Join
                Merge Cond: (c1.x = c2.x)
                ->  Sort
@@ -3657,7 +3657,7 @@ GROUP BY c1.y,c2.x,c1.x;
                      Sort Key: c2.x
                      ->  Seq Scan on group_agg_pk c2
                            Disabled: true
-(15 rows)
+(14 rows)
 
 RESET enable_nestloop;
 RESET enable_hashjoin;
@@ -3671,17 +3671,19 @@ ANALYZE agg_sort_order;
 EXPLAIN (COSTS OFF)
 SELECT array_agg(c1 ORDER BY c2),c2
 FROM agg_sort_order WHERE c2 < 100 GROUP BY c1 ORDER BY 2;
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Sort
    Sort Key: c2
    ->  GroupAggregate
          Group Key: c1
          ->  Sort
                Sort Key: c1, c2
-               ->  Index Scan using agg_sort_order_c2_idx on agg_sort_order
-                     Index Cond: (c2 < 100)
-(8 rows)
+               ->  Bitmap Heap Scan on agg_sort_order
+                     Recheck Cond: (c2 < 100)
+                     ->  Bitmap Index Scan on agg_sort_order_c2_idx
+                           Index Cond: (c2 < 100)
+(10 rows)
 
 DROP TABLE agg_sort_order CASCADE;
 DROP TABLE btg;
@@ -3715,13 +3717,13 @@ ALTER TABLE tenk1 set (parallel_workers = 4);
 SET LOCAL parallel_setup_cost=0;
 SET LOCAL max_parallel_workers_per_gather=4;
 EXPLAIN (COSTS OFF) SELECT balk(hundred) FROM tenk1;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Finalize Aggregate
    ->  Gather
          Workers Planned: 4
          ->  Partial Aggregate
-               ->  Parallel Index Only Scan using tenk1_hundred on tenk1
+               ->  Parallel Seq Scan on tenk1
 (5 rows)
 
 SELECT balk(hundred) FROM tenk1;

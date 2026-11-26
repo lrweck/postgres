@@ -163,12 +163,11 @@ SELECT DISTINCT ON (y, x) x, y FROM (SELECT * FROM distinct_on_tbl ORDER BY x) s
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
  Unique
-   ->  Incremental Sort
-         Sort Key: s.x, s.y
-         Presorted Key: s.x
+   ->  Sort
+         Sort Key: s.y, s.x
          ->  Subquery Scan on s
                ->  Index Only Scan using distinct_on_tbl_x_y_idx on distinct_on_tbl
-(6 rows)
+(5 rows)
 
 SELECT DISTINCT ON (y, x) x, y FROM (SELECT * FROM distinct_on_tbl ORDER BY x) s;
  x | y 
@@ -215,19 +214,16 @@ SELECT DISTINCT ON (y, x) x, y FROM distinct_on_tbl ORDER BY y;
 -- Ensure the resulting pathkey list matches the initial distinctClause Pathkeys
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT ON (y, x) x, y FROM (select * from distinct_on_tbl order by x, z, y) s ORDER BY y, x, z;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
- Sort
-   Sort Key: s.y, s.x, s.z
-   ->  Unique
-         ->  Incremental Sort
-               Sort Key: s.x, s.y, s.z
-               Presorted Key: s.x
-               ->  Subquery Scan on s
-                     ->  Sort
-                           Sort Key: distinct_on_tbl.x, distinct_on_tbl.z, distinct_on_tbl.y
-                           ->  Seq Scan on distinct_on_tbl
-(10 rows)
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: s.y, s.x, s.z
+         ->  Subquery Scan on s
+               ->  Sort
+                     Sort Key: distinct_on_tbl.x, distinct_on_tbl.z, distinct_on_tbl.y
+                     ->  Seq Scan on distinct_on_tbl
+(7 rows)
 
 SELECT DISTINCT ON (y, x) x, y FROM (select * from distinct_on_tbl order by x, z, y) s ORDER BY y, x, z;
  x | y 

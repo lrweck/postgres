@@ -2500,6 +2500,58 @@ has_unique_index(RelOptInfo *rel, AttrNumber attno)
 	return false;
 }
 
+/*
+ * relation_has_unique_key_for
+ *
+ * Detect whether the relation has a unique index over exactly the set of
+ * columns given by 'vars', in any order, thus allowing us to conclude that
+ * every row has a distinct combination of those columns.
+ *
+ * As in has_unique_index(), partial indexes count only when the query
+ * implies their predicate, and expression indexes are ignored.
+ */
+bool
+relation_has_unique_key_for(RelOptInfo *rel, List *vars)
+{
+	Bitmapset  *attnums = NULL;
+	ListCell   *lc;
+	bool		result = false;
+
+	if (rel->reloptkind != RELOPT_BASEREL || rel->tuples <= 0)
+		return false;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+
+		if (var->varattno > 0)
+			attnums = bms_add_member(attnums, var->varattno);
+	}
+
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+		Bitmapset  *indexcols = NULL;
+		int			i;
+
+		if (!index->unique || index->indexprs != NIL ||
+			(index->indpred != NIL && !index->predOK) ||
+			index->nkeycolumns < 1)
+			continue;
+
+		for (i = 0; i < index->nkeycolumns; i++)
+			indexcols = bms_add_member(indexcols, index->indexkeys[i]);
+
+		result = bms_equal(indexcols, attnums);
+		bms_free(indexcols);
+
+		if (result)
+			break;
+	}
+
+	bms_free(attnums);
+	return result;
+}
 
 /*
  * has_row_triggers

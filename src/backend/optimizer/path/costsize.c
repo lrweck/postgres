@@ -739,7 +739,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 			rand_heap_pages = accesses;
 			max_IO_cost = misses * spc_random_page_cost +
-				Max(accesses - misses, 0.0) * COST_ROW_SCAN;
+				Max(accesses - misses, 0.0) * COST_ROW_INDEX;
 		}
 
 		/*
@@ -843,13 +843,13 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	/*
 	 * Estimate CPU costs per tuple.
 	 *
-	 * What we want here is COST_ROW_SCAN plus the evaluation costs of any
+	 * What we want here is COST_ROW_INDEX plus the evaluation costs of any
 	 * qual clauses that we have to evaluate as qpquals.
 	 */
 	cost_qual_eval(&qpqual_cost, qpquals, root);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_INDEX + qpqual_cost.per_tuple;
 
 	cpu_run_cost += cpu_per_tuple * tuples_fetched;
 
@@ -866,7 +866,6 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 		double		heap_pages;
 		double		miss_heap;
 		double		miss_idx;
-		double		tree_h;
 
 		/*
 		 * Model cache residency per structure, with the LRU-like curve
@@ -885,10 +884,13 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 			((double) baserel->pages + cache);
 		miss_idx = (double) index->pages /
 			((double) index->pages + cache);
-		tree_h = (index->tree_height > 0) ? index->tree_height : 1;
-
+		/*
+		 * The upper levels of a btree are touched by every probe and stay
+		 * resident; only the leaf page may miss.  Charge one index page,
+		 * not the whole descent, plus the heap pages the rows live on.
+		 */
 		run_cost += random_page_cost *
-			(tree_h * miss_idx + heap_pages * miss_heap);
+			(miss_idx + heap_pages * miss_heap);
 	}
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
@@ -1861,13 +1863,18 @@ cost_ctescan(Path *path, PlannerInfo *root,
 	 * pulled from the store: a CTE scanned with a LIMIT or under a nested
 	 * loop reads only a fraction of what was materialized.
 	 */
-	cpu_per_tuple = COST_ROW_SCAN;
-
 	/* Add scanning CPU costs */
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple += COST_ROW_SCAN + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_CTE + qpqual_cost.per_tuple;
+	/*
+	 * A CTE read under a LIMIT stops as soon as the limit is satisfied: the
+	 * executor pulls only the rows it needs, not the rows the CTE stored.
+	 * Charge the rows that will actually be read.
+	 */
+	if (root->limit_tuples > 0.0)
+		path->rows = Min(path->rows, root->limit_tuples);
 	/* charge the rows actually pulled from the tuplestore */
 	run_cost += cpu_per_tuple * path->rows;
 
@@ -3126,6 +3133,13 @@ cost_agg(Path *path, PlannerInfo *root,
 		total_cost += aggcosts->transCost.startup;
 		total_cost += aggcosts->transCost.per_tuple * input_tuples;
 		total_cost += (COST_OP_AGG * numGroupCols) * input_tuples;
+		/*
+		 * Measured (H13): walking every input row in sorted order costs
+		 * about 11 units per row on this machine, an order of magnitude
+		 * more than the rest of this branch charges.  Hashing settles a
+		 * group the first time it is seen; sorting must touch every row.
+		 */
+		total_cost += 10.0 * input_tuples;
 		total_cost += aggcosts->finalCost.startup;
 		total_cost += aggcosts->finalCost.per_tuple * numGroups;
 		total_cost += COST_ROW_AGG * numGroups;
@@ -3910,7 +3924,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	/* CPU costs */
 	cost_qual_eval(&restrict_qual_cost, path->jpath.joinrestrictinfo, root);
 	startup_cost += restrict_qual_cost.startup;
-	cpu_per_tuple = COST_ROW_JOIN + restrict_qual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_JOIN_NL + restrict_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * ntuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
@@ -4492,7 +4506,7 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 
 	/*
 	 * For each tuple that gets through the mergejoin proper, we charge
-	 * COST_ROW_JOIN plus the cost of evaluating additional restriction
+	 * COST_ROW_JOIN_MERGE plus the cost of evaluating additional restriction
 	 * clauses that are to be applied at the join.  (This is pessimistic since
 	 * not all of the quals may get evaluated at each tuple.)
 	 *
@@ -4500,7 +4514,7 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 	 * evaluations here, but it's probably not worth the trouble.
 	 */
 	startup_cost += qp_qual_cost.startup;
-	cpu_per_tuple = COST_ROW_JOIN + qp_qual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_JOIN_MERGE + qp_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * mergejointuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
@@ -4983,7 +4997,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 
 	/*
 	 * For each tuple that gets through the hashjoin proper, we charge
-	 * COST_ROW_JOIN plus the cost of evaluating additional restriction
+	 * COST_ROW_JOIN_HASH plus the cost of evaluating additional restriction
 	 * clauses that are to be applied at the join.
 	 *
 	 * For plain joins, all these quals are charged at each hashjointuples
@@ -4998,7 +5012,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	 *
 	 * A RIGHT_ANTI join has no such short-circuit, so its non-hashed
 	 * joinquals are evaluated for every tuple passing the hash quals.  Charge
-	 * them on that count, and only COST_ROW_JOIN on hashjointuples.  (This
+	 * them on that count, and only COST_ROW_JOIN_HASH on hashjointuples.  (This
 	 * overcharges any pushed-down clauses, which are evaluated just once per
 	 * emitted row, but such clauses are rare at a right anti join.)
 	 */
@@ -5014,11 +5028,11 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 			joinqual_tuples = approx_tuple_count(root, &path->jpath,
 												 hashclauses);
 		run_cost += qp_qual_cost.per_tuple * joinqual_tuples;
-		run_cost += COST_ROW_JOIN * hashjointuples;
+		run_cost += COST_ROW_JOIN_HASH * hashjointuples;
 	}
 	else
 	{
-		cpu_per_tuple = COST_ROW_JOIN + qp_qual_cost.per_tuple;
+		cpu_per_tuple = COST_ROW_JOIN_HASH + qp_qual_cost.per_tuple;
 		run_cost += cpu_per_tuple * hashjointuples;
 	}
 
@@ -6193,56 +6207,6 @@ set_joinrel_distinct_cap(PlannerInfo *root, RelOptInfo *rel,
 
 	rel->join_cap_varno = cap_varno;
 	rel->join_cap_rows = cap_rows;
-}
-
-/*
- * relation_has_unique_key_for
- *		True if the relation has a unique index over exactly these columns.
- *
- * Partial indexes count only when the query implies their predicate, and
- * expression indexes are ignored, as in has_unique_index().
- */
-static bool
-relation_has_unique_key_for(RelOptInfo *rel, List *vars)
-{
-	Bitmapset  *attnums = NULL;
-	ListCell   *lc;
-	bool		result = false;
-
-	if (rel->reloptkind != RELOPT_BASEREL || rel->tuples <= 0)
-		return false;
-
-	foreach(lc, vars)
-	{
-		Var		   *var = lfirst_node(Var, lc);
-
-		if (var->varattno > 0)
-			attnums = bms_add_member(attnums, var->varattno);
-	}
-
-	foreach(lc, rel->indexlist)
-	{
-		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
-		Bitmapset  *indexcols = NULL;
-		int			i;
-
-		if (!index->unique || index->indexprs != NIL ||
-			(index->indpred != NIL && !index->predOK) ||
-			index->nkeycolumns < 1)
-			continue;
-
-		for (i = 0; i < index->nkeycolumns; i++)
-			indexcols = bms_add_member(indexcols, index->indexkeys[i]);
-
-		result = bms_equal(indexcols, attnums);
-		bms_free(indexcols);
-
-		if (result)
-			break;
-	}
-
-	bms_free(attnums);
-	return result;
 }
 
 /*

@@ -51,7 +51,12 @@
  * probe: they do different work.  Each is priced where it happens, so
  * calibrating one does not move the others.
  */
-#define COST_OP_QUAL     (0.0025 * COST_CPU_SCALE)   /* filter/restriction eval */
+/*
+ * Evaluating a filter comparison is a few nanoseconds: it does not carry
+ * the per-row memory cost of a hash probe or a sort comparison.  Measured
+ * separately, it needs a much smaller factor than the volume work.
+ */
+#define COST_OP_QUAL     (0.0025 * 5.0)              /* filter/restriction eval */
 #define COST_OP_SORT     (0.0025 * COST_CPU_SCALE)   /* sort comparison */
 #define COST_OP_JOIN     (0.0025 * COST_CPU_SCALE)   /* join comparison */
 #define COST_OP_AGG      (0.0025 * COST_CPU_SCALE)   /* aggregate transition */
@@ -64,11 +69,17 @@
  * measured per-row cost of a sequential scan already matches the model, so
  * this one keeps the historical value instead of the calibrated one.
  */
-#define COST_ROW_SCAN    0.01                             /* 1x, unscaled */
-#define COST_ROW_JOIN    (DEFAULT_CPU_TUPLE_COST * 2.0)    /* measured 63x vs scan */
-#define COST_ROW_AGG     (DEFAULT_CPU_TUPLE_COST * 2.0)    /* measured 61x */
-#define COST_ROW_SORT    (DEFAULT_CPU_TUPLE_COST * 4.0)    /* measured 218x */
+#define COST_ROW_SCAN    0.031
+#define COST_ROW_JOIN    0.5
+#define COST_ROW_JOIN_NL    11.0
+#define COST_ROW_JOIN_HASH  0.21
+#define COST_ROW_JOIN_MERGE 0.97
+#define COST_ROW_AGG     2.15
+#define COST_ROW_SORT    0.585
 
+#define COST_ROW_INDEX   0.5
+#define COST_ROW_CTE     2.78
+#define COST_ROW_SETOP   14.9
 #define COST_OP_INDEX    0.0025                      /* index qual per probed tuple */
 #define COST_OP_DESCENT  0.0025                      /* btree descent, fixed per probe */
 /*

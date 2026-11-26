@@ -2066,7 +2066,7 @@ SELECT count(*) FROM tenk1 t1
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t1
+   ->  Seq Scan on tenk1 t1
          Filter: ((thousand = 42) OR (thousand = (SubPlan expr_1)))
          SubPlan expr_1
            ->  Limit
@@ -2260,18 +2260,17 @@ EXPLAIN (COSTS OFF)
 SELECT count(*) FROM tenk1 LEFT JOIN tenk2 ON
   tenk1.hundred = 42 AND (tenk2.thousand = 42 OR tenk2.thousand = 41 OR tenk2.tenthous = 2) AND
   tenk2.hundred = tenk1.hundred;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Aggregate
-   ->  Merge Left Join
-         Merge Cond: (tenk1.hundred = tenk2.hundred)
+   ->  Hash Right Join
+         Hash Cond: (tenk2.hundred = tenk1.hundred)
          Join Filter: (tenk1.hundred = 42)
-         ->  Index Only Scan using tenk1_hundred on tenk1
-         ->  Sort
-               Sort Key: tenk2.hundred
-               ->  Seq Scan on tenk2
-                     Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
-(9 rows)
+         ->  Seq Scan on tenk2
+               Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
+         ->  Hash
+               ->  Seq Scan on tenk1
+(8 rows)
 
 --
 -- Check behavior with duplicate index column contents
@@ -2563,11 +2562,13 @@ SELECT unique1 FROM tenk1 WHERE unique1 IN (1, 42, 7) and unique1 < (-1)::bigint
 
 explain (costs off)
 SELECT unique1 FROM tenk1 WHERE (thousand, tenthous) > (NULL, 5);
-                           QUERY PLAN                            
------------------------------------------------------------------
- Index Scan using tenk1_thous_tenthous on tenk1
-   Index Cond: (ROW(thousand, tenthous) > ROW(NULL::integer, 5))
-(2 rows)
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Bitmap Heap Scan on tenk1
+   Recheck Cond: (ROW(thousand, tenthous) > ROW(NULL::integer, 5))
+   ->  Bitmap Index Scan on tenk1_thous_tenthous
+         Index Cond: (ROW(thousand, tenthous) > ROW(NULL::integer, 5))
+(4 rows)
 
 SELECT unique1 FROM tenk1 WHERE (thousand, tenthous) > (NULL, 5);
  unique1 
@@ -2638,11 +2639,13 @@ ORDER BY thousand limit 2;
 --
 explain (costs off)
   select * from tenk1 where (thousand, tenthous) in ((1,1001), (null,null));
-                      QUERY PLAN                      
-------------------------------------------------------
- Index Scan using tenk1_thous_tenthous on tenk1
-   Index Cond: ((thousand = 1) AND (tenthous = 1001))
-(2 rows)
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Bitmap Heap Scan on tenk1
+   Recheck Cond: ((thousand = 1) AND (tenthous = 1001))
+   ->  Bitmap Index Scan on tenk1_thous_tenthous
+         Index Cond: ((thousand = 1) AND (tenthous = 1001))
+(4 rows)
 
 --
 -- Check matching of boolean index columns to WHERE conditions and sort keys

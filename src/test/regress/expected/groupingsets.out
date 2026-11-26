@@ -569,8 +569,8 @@ select x, y
   where x = 1
   group by grouping sets (x, y)
   order by 1, 2;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Sort
    Sort Key: t1.unique1, t1.unique2
    ->  GroupAggregate
@@ -580,7 +580,7 @@ select x, y
          ->  Nested Loop
                ->  Index Scan using tenk1_unique1 on tenk1 t1
                      Index Cond: (unique1 = 1)
-               ->  Index Only Scan using tenk1_hundred on tenk1 t2
+               ->  Seq Scan on tenk1 t2
 (10 rows)
 
 select x, y
@@ -1520,15 +1520,17 @@ select a, b, sum(v), count(*) from gstest_empty group by grouping sets ((a,b),()
 
 explain (costs off)
   select a, b, sum(v), count(*) from gstest_empty group by grouping sets ((a,b),(),(),());
-           QUERY PLAN           
---------------------------------
- MixedAggregate
-   Hash Key: a, b
+              QUERY PLAN              
+--------------------------------------
+ GroupAggregate
+   Group Key: a, b
    Group Key: ()
    Group Key: ()
    Group Key: ()
-   ->  Seq Scan on gstest_empty
-(6 rows)
+   ->  Sort
+         Sort Key: a, b
+         ->  Seq Scan on gstest_empty
+(8 rows)
 
 select sum(v), count(*) from gstest_empty group by grouping sets ((),(),());
  sum | count 
@@ -2396,32 +2398,34 @@ order by a, b, c;
 -- test handling of outer GroupingFunc within subqueries
 explain (costs off)
 select (select grouping(v1)) from (values ((select 1))) v(v1) group by cube(v1);
-             QUERY PLAN             
-------------------------------------
- MixedAggregate
-   Hash Key: (InitPlan expr_3).col1
+                 QUERY PLAN                 
+--------------------------------------------
+ GroupAggregate
+   Group Key: ((InitPlan expr_3).col1)
    Group Key: ()
    InitPlan expr_1
      ->  Result
    InitPlan expr_3
      ->  Result
-   ->  Result
+   ->  Sort
+         Sort Key: ((InitPlan expr_3).col1)
+         ->  Result
    SubPlan expr_2
      ->  Result
-(10 rows)
+(12 rows)
 
 select (select grouping(v1)) from (values ((select 1))) v(v1) group by cube(v1);
  grouping 
 ----------
-        1
         0
+        1
 (2 rows)
 
 explain (costs off)
 select (select grouping(v1)) from (values ((select 1))) v(v1) group by v1;
     QUERY PLAN     
 -------------------
- GroupAggregate
+ HashAggregate
    InitPlan expr_2
      ->  Result
    InitPlan expr_3
@@ -2543,14 +2547,16 @@ order by o nulls first;
 -- test handling of expressions that should match lower target items
 explain (costs off)
 select a < b and b < 3 from (values (1, 2)) t(a, b) group by rollup(a < b and b < 3) having a < b and b < 3;
-            QUERY PLAN             
------------------------------------
- MixedAggregate
-   Hash Key: ((1 < 2) AND (2 < 3))
+                QUERY PLAN                 
+-------------------------------------------
+ GroupAggregate
+   Group Key: (((1 < 2) AND (2 < 3)))
    Group Key: ()
    Filter: (((1 < 2) AND (2 < 3)))
-   ->  Result
-(5 rows)
+   ->  Sort
+         Sort Key: (((1 < 2) AND (2 < 3)))
+         ->  Result
+(7 rows)
 
 select a < b and b < 3 from (values (1, 2)) t(a, b) group by rollup(a < b and b < 3) having a < b and b < 3;
  ?column? 
@@ -2560,14 +2566,16 @@ select a < b and b < 3 from (values (1, 2)) t(a, b) group by rollup(a < b and b 
 
 explain (costs off)
 select not a from (values(true)) t(a) group by rollup(not a) having not not a;
-          QUERY PLAN          
-------------------------------
- MixedAggregate
-   Hash Key: (NOT true)
+           QUERY PLAN           
+--------------------------------
+ GroupAggregate
+   Group Key: ((NOT true))
    Group Key: ()
    Filter: (NOT ((NOT true)))
-   ->  Result
-(5 rows)
+   ->  Sort
+         Sort Key: ((NOT true))
+         ->  Result
+(7 rows)
 
 select not a from (values(true)) t(a) group by rollup(not a) having not not a;
  ?column? 
@@ -2668,11 +2676,13 @@ select 1 as one group by rollup(one) order by one nulls first;
 -----------------------------
  Sort
    Sort Key: (1) NULLS FIRST
-   ->  MixedAggregate
-         Hash Key: 1
+   ->  GroupAggregate
+         Group Key: (1)
          Group Key: ()
-         ->  Result
-(6 rows)
+         ->  Sort
+               Sort Key: (1)
+               ->  Result
+(8 rows)
 
 select 1 as one group by rollup(one) order by one nulls first;
  one 
@@ -2715,20 +2725,23 @@ select generate_series(1, a) as g
 from (values (1, 1), (2, 2)) as t (a, b)
 group by rollup(g)
 order by 1;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Sort
    Output: (generate_series(1, "*VALUES*".column1))
    Sort Key: (generate_series(1, "*VALUES*".column1))
-   ->  MixedAggregate
+   ->  GroupAggregate
          Output: (generate_series(1, "*VALUES*".column1))
-         Hash Key: generate_series(1, "*VALUES*".column1)
+         Group Key: (generate_series(1, "*VALUES*".column1))
          Group Key: ()
-         ->  ProjectSet
-               Output: generate_series(1, "*VALUES*".column1)
-               ->  Values Scan on "*VALUES*"
-                     Output: "*VALUES*".column1
-(11 rows)
+         ->  Sort
+               Output: (generate_series(1, "*VALUES*".column1))
+               Sort Key: (generate_series(1, "*VALUES*".column1))
+               ->  ProjectSet
+                     Output: generate_series(1, "*VALUES*".column1)
+                     ->  Values Scan on "*VALUES*"
+                           Output: "*VALUES*".column1
+(14 rows)
 
 select generate_series(1, a) as g
 from (values (1, 1), (2, 2)) as t (a, b)
@@ -2753,14 +2766,17 @@ order by 1, 2;
    Sort Key: (generate_series(1, "*VALUES*".column1)), (("*VALUES*".column1 + "*VALUES*".column2))
    ->  ProjectSet
          Output: generate_series(1, "*VALUES*".column1), (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
-         ->  MixedAggregate
+         ->  GroupAggregate
                Output: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
-               Hash Key: "*VALUES*".column1, ("*VALUES*".column1 + "*VALUES*".column2)
-               Hash Key: "*VALUES*".column1
+               Group Key: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
+               Group Key: "*VALUES*".column1
                Group Key: ()
-               ->  Values Scan on "*VALUES*"
-                     Output: ("*VALUES*".column1 + "*VALUES*".column2), "*VALUES*".column1
-(12 rows)
+               ->  Sort
+                     Output: (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
+                     Sort Key: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
+                     ->  Values Scan on "*VALUES*"
+                           Output: ("*VALUES*".column1 + "*VALUES*".column2), "*VALUES*".column1
+(15 rows)
 
 select generate_series(1, a) as g, a+b as ab
 from (values (1, 1), (2, 2)) as t (a, b)

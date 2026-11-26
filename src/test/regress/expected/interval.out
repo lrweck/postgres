@@ -2141,10 +2141,10 @@ SELECT lhst.i lhs,
     lhs    |           rhs           | lt | le | eq | gt | ge | ne 
 -----------+-------------------------+----+----+----+----+----+----
  infinity  | infinity                | f  | t  | t  | f  | t  | f
- -infinity | infinity                | t  | t  | f  | f  | f  | t
  infinity  | -infinity               | f  | f  | f  | t  | t  | t
- -infinity | -infinity               | f  | t  | t  | f  | t  | f
  infinity  | @ 1 year 2 days 3 hours | f  | f  | f  | t  | t  | t
+ -infinity | infinity                | t  | t  | f  | f  | f  | t
+ -infinity | -infinity               | f  | t  | t  | f  | t  | f
  -infinity | @ 1 year 2 days 3 hours | t  | t  | f  | f  | f  | t
 (6 rows)
 
