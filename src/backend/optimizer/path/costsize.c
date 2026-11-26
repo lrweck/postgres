@@ -928,14 +928,7 @@ cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
 		scanned * cpu_per_group;
 
 	*descend = (descend_cost < walk_cost);
-	if (path->indexscandir != ForwardScanDirection)
-	{
-		/* Backward loose scans currently always use the leaf walk */
-		*descend = false;
-		run_cost = walk_cost;
-	}
-	else
-		run_cost = *descend ? descend_cost : walk_cost;
+	run_cost = *descend ? descend_cost : walk_cost;
 
 	/*
 	 * Heap access: a plain scan fetches every entry it examines; an

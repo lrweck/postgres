@@ -5440,7 +5440,7 @@ make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 	ipath = (IndexPath *) path;
 	index = ipath->indexinfo;
 
-	if (index->relam != BTREE_AM_OID || index->indpred != NIL)
+	if (!index->amcanskipscan || index->indpred != NIL)
 		return NULL;
 	if (ipath->path.param_info != NULL || ipath->indexorderbys != NIL)
 		return NULL;

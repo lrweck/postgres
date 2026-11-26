@@ -1759,8 +1759,78 @@ _bt_looseskip_backward(IndexScanDesc scan, BTScanInsert key, Page page)
 	Relation	rel = scan->indexRelation;
 	BTPageOpaque opaque;
 	BlockNumber blkno;
+	OffsetNumber offnum;
 	int			lo,
 				hi;
+
+	if (so->skipdescend && so->numArrayKeys == 0)
+	{
+		BlockNumber prevblk,
+					lastblk;
+
+		/*
+		 * Descend to the last tuple strictly less than the group key.  This is
+		 * the backward counterpart of the forward next-key search.
+		 */
+		key->nextkey = false;
+		key->backward = true;
+
+		_bt_unlockbuf(rel, so->currPos.buf);
+		if (so->numKilled > 0)
+			_bt_killitems(scan);
+		_bt_savemark(scan);
+		BTScanPosUnpinIfPinned(so->currPos);
+
+		_bt_search(rel, NULL, key, &so->currPos.buf, BT_READ, false);
+		if (scan->instrument)
+			scan->instrument->nsearches++;
+
+		if (!BufferIsValid(so->currPos.buf))
+		{
+			BTScanPosInvalidate(so->currPos);
+			so->skipdone = true;
+			pfree(key);
+			return true;
+		}
+
+		offnum = _bt_binsrch(rel, key, so->currPos.buf);
+		so->currPos.moreLeft = true;
+		so->currPos.moreRight = true;
+
+		if (_bt_readpage(scan, BackwardScanDirection, offnum, false))
+		{
+			/* _bt_next() decrements into lastItem */
+			so->currPos.itemIndex = so->currPos.lastItem + 1;
+			_bt_drop_lock_and_maybe_pin(rel, so);
+			pfree(key);
+			return true;
+		}
+
+		if (!so->currPos.moreLeft || so->currPos.prevPage == P_NONE)
+		{
+			so->currPos.itemIndex = so->currPos.firstItem;
+			_bt_drop_lock_and_maybe_pin(rel, so);
+			pfree(key);
+			return true;
+		}
+
+		prevblk = so->currPos.prevPage;
+		lastblk = so->currPos.currPage;
+		_bt_unlockbuf(rel, so->currPos.buf);
+		BTScanPosUnpin(so->currPos);
+
+		if (!_bt_readnextpage(scan, prevblk, lastblk,
+							  BackwardScanDirection, false))
+		{
+			so->skipdone = true;
+			pfree(key);
+			return true;
+		}
+
+		so->currPos.itemIndex = so->currPos.lastItem + 1;
+		pfree(key);
+		return true;
+	}
 
 	/* Find the first item of this group on the current page */
 	lo = so->currPos.firstItem;
@@ -1912,13 +1982,15 @@ _bt_looseskip(IndexScanDesc scan)
 		return false;
 
 	/*
-	 * A loose scan deliberately does not visit the heap pages of the skipped
-	 * entries, so it cannot take the predicate locks SSI needs.  Fall back to
-	 * a normal scan there; the Unique/Group node above the scan is still in
-	 * the plan, so correctness does not depend on the skip.
+	 * A loose scan does not visit the heap pages (or, in descend mode, every
+	 * leaf page) of the entries it skips, so it cannot take the fine-grained
+	 * predicate locks SSI needs for those rows.  Any concurrent change that
+	 * can affect the distinct set must modify this index, so take a
+	 * relation-level predicate lock instead.  It is coarse, but it keeps the
+	 * skip and is correct.
 	 */
 	if (IsolationIsSerializable())
-		return false;
+		PredicateLockRelation(scan->indexRelation, scan->xs_snapshot);
 
 	/* btrescan() keeps the leaf page pinned when a loose scan is requested */
 	Assert(BTScanPosIsPinned(so->currPos));

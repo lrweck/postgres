@@ -65,7 +65,7 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b FROM skipscan_t
 ----------------------------------------------------------------------
  Unique
    ->  Index Only Scan Backward using skipscan_t_ab_idx on skipscan_t
-   Skip Atts: 1 (walk)
+   Skip Atts: 1 (descend)
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (a) a, b, c FROM skipscan_t

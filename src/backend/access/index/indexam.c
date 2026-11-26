@@ -518,10 +518,10 @@ index_skip_group(IndexScanDesc scan)
 {
 	SCAN_CHECKS;
 
-	if (scan->xs_skip_group == NULL)
+	if (scan->indexRelation->rd_indam->amskipscan == NULL)
 		return false;
 
-	return scan->xs_skip_group(scan);
+	return scan->indexRelation->rd_indam->amskipscan(scan);
 }
 
 /*

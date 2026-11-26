@@ -121,10 +121,8 @@ IndexNext(IndexScanState *node)
 
 		node->iss_ScanDesc = scandesc;
 
-		scandesc->xs_num_skip_atts = node->ss.ss_SkipSupported ?
-			node->iss_NumSkipAtts : 0;
-		scandesc->xs_skip_descend = node->ss.ss_SkipSupported ?
-			node->iss_SkipDescend : false;
+		scandesc->xs_num_skip_atts = node->iss_NumSkipAtts;
+		scandesc->xs_skip_descend = node->iss_SkipDescend;
 
 		/*
 		 * If no run-time keys to calculate or they are ready, go ahead and
@@ -950,8 +948,7 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 
 	indexstate->iss_NumSkipAtts = node->indexskipatts;
 	indexstate->iss_SkipDescend = node->indexskipdescend;
-	indexstate->ss.ss_SkipSupported =
-		(node->indexskipatts > 0 && !IsolationIsSerializable());
+	indexstate->ss.ss_SkipSupported = (node->indexskipatts > 0);
 	indexstate->ss.ss_SkipPending = false;
 	indexstate->ss.ss_SkipDirection = NoMovementScanDirection;
 

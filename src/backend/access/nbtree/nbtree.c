@@ -142,6 +142,7 @@ bthandler(PG_FUNCTION_ARGS)
 		.amstorage = false,
 		.amclusterable = true,
 		.ampredlocks = true,
+		.amcanskipscan = true,
 		.amcanparallel = true,
 		.amcanbuildparallel = true,
 		.amcaninclude = true,
@@ -169,6 +170,7 @@ bthandler(PG_FUNCTION_ARGS)
 		.amrescan = btrescan,
 		.amgettuple = btgettuple,
 		.amgetbitmap = btgetbitmap,
+		.amskipscan = _bt_looseskip,
 		.amendscan = btendscan,
 		.ammarkpos = btmarkpos,
 		.amrestrpos = btrestrpos,
@@ -388,8 +390,6 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	so->currTuples = so->markTuples = NULL;
 
 	scan->xs_itupdesc = RelationGetDescr(rel);
-
-	scan->xs_skip_group = _bt_looseskip;
 
 	scan->opaque = so;
 
