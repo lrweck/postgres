@@ -176,8 +176,13 @@ ExecScanExtended(ScanState *node,
 	 */
 	if (!qual && !projInfo)
 	{
+		TupleTableSlot *slot;
+
 		ResetExprContext(econtext);
-		return ExecScanFetch(node, epqstate, accessMtd, recheckMtd);
+		slot = ExecScanFetch(node, epqstate, accessMtd, recheckMtd);
+		if (!TupIsNull(slot) && node->ss_SkipSupported)
+			node->ss_SkipPending = true;
+		return slot;
 	}
 
 	/*
@@ -225,8 +230,13 @@ ExecScanExtended(ScanState *node,
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
 			/*
-			 * Found a satisfactory scan tuple.
+			 * Found a satisfactory scan tuple.  For a loose scan, this is the
+			 * first point where we know the tuple was not rejected by the
+			 * executor's quals, so only now may we skip the rest of the group.
 			 */
+			if (node->ss_SkipSupported)
+				node->ss_SkipPending = true;
+
 			if (projInfo)
 			{
 				/*

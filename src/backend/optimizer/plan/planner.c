@@ -5425,7 +5425,6 @@ make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 	IndexOptInfo *index;
 	int			k;
 	int			nskip = 0;
-	ListCell   *lc;
 
 	if (!enable_skipscan)
 		return NULL;
@@ -5443,38 +5442,8 @@ make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 
 	if (index->relam != BTREE_AM_OID || index->indpred != NIL)
 		return NULL;
-	if (ipath->indexscandir != ForwardScanDirection)
-		return NULL;
 	if (ipath->path.param_info != NULL || ipath->indexorderbys != NIL)
 		return NULL;
-
-	/* Every restriction clause must be an exact index qual (empty qpqual) */
-	foreach(lc, input_rel->baserestrictinfo)
-	{
-		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-		bool		found = false;
-		ListCell   *lc2;
-
-		foreach(lc2, ipath->indexclauses)
-		{
-			IndexClause *iclause = lfirst_node(IndexClause, lc2);
-
-			if (iclause->rinfo != rinfo)
-				continue;
-
-			/*
-			 * Lossy index quals (e.g. those derived from LIKE) leave a
-			 * recheck qual behind; another row of the group might pass it.
-			 */
-			if (iclause->lossy)
-				return NULL;
-
-			found = true;
-			break;
-		}
-		if (!found)
-			return NULL;
-	}
 
 	/*
 	 * Leading key columns fixed by equality quals are constant, so they are

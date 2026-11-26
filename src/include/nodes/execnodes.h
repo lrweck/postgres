@@ -1647,6 +1647,10 @@ typedef struct ScanState
 	Relation	ss_currentRelation;
 	struct TableScanDescData *ss_currentScanDesc;
 	TupleTableSlot *ss_ScanTupleSlot;
+	/* loose scan: arm the group skip after the scan qual accepts a tuple */
+	bool		ss_SkipSupported;
+	bool		ss_SkipPending;
+	ScanDirection ss_SkipDirection;	/* direction of the pending tuple */
 } ScanState;
 
 /* ----------------
@@ -1750,7 +1754,6 @@ typedef struct IndexScanState
 	SharedIndexScanInstrumentation *iss_SharedInfo;
 	int			iss_NumSkipAtts;	/* loose scan: leading index columns */
 	bool		iss_SkipDescend;	/* skip by re-descending the tree */
-	bool		iss_SkipPending;	/* skip the previous tuple's group next time */
 
 	/* These are needed for re-checking ORDER BY expr ordering */
 	pairingheap *iss_ReorderQueue;
@@ -1801,7 +1804,6 @@ typedef struct IndexOnlyScanState
 	Size		ioss_PscanLen;
 	int			ioss_NumSkipAtts;	/* loose scan: leading DISTINCT columns */
 	bool		ioss_SkipDescend;	/* skip by re-descending the tree */
-	bool		ioss_SkipPending;	/* skip the previous tuple's group next time */
 } IndexOnlyScanState;
 
 /* ----------------

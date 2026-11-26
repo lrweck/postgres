@@ -115,10 +115,10 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	 * to here because the previous result slot may still reference the index
 	 * AM's tuple workspace.
 	 */
-	if (node->ioss_SkipPending)
+	if (node->ss.ss_SkipPending)
 	{
-		node->ioss_SkipPending = false;
-		if (ScanDirectionIsForward(direction))
+		node->ss.ss_SkipPending = false;
+		if (direction == node->ss.ss_SkipDirection)
 			(void) index_skip_group(scandesc);
 	}
 
@@ -156,9 +156,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("lossy distance functions are not supported in index-only scans")));
 
-		if (node->ioss_NumSkipAtts > 0)
-			node->ioss_SkipPending = true;
-
+		node->ss.ss_SkipDirection = direction;
 		return slot;
 	}
 
@@ -237,7 +235,7 @@ ExecReScanIndexOnlyScan(IndexOnlyScanState *node)
 	node->ioss_RuntimeKeysReady = true;
 
 	/* reset index scan */
-	node->ioss_SkipPending = false;
+	node->ss.ss_SkipPending = false;
 	if (node->ioss_ScanDesc)
 		index_rescan(node->ioss_ScanDesc,
 					 node->ioss_ScanKeys, node->ioss_NumScanKeys,
@@ -393,7 +391,9 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 
 	indexstate->ioss_NumSkipAtts = node->indexskipatts;
 	indexstate->ioss_SkipDescend = node->indexskipdescend;
-	indexstate->ioss_SkipPending = false;
+	indexstate->ss.ss_SkipSupported = (node->indexskipatts > 0);
+	indexstate->ss.ss_SkipPending = false;
+	indexstate->ss.ss_SkipDirection = NoMovementScanDirection;
 
 	/*
 	 * Miscellaneous initialization

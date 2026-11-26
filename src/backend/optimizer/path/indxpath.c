@@ -1047,6 +1047,21 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  false);
 			result = lappend(result, ipath);
 
+			/*
+			 * Keep the backward path too: a loose scan can walk or re-descend
+			 * in the backward direction.
+			 */
+			if (scantype != ST_BITMAPSCAN &&
+				(root->distinct_pathkeys != NIL ||
+				 root->group_pathkeys != NIL))
+			{
+				IndexPath  *loose_path;
+
+				loose_path = palloc(sizeof(IndexPath));
+				memcpy(loose_path, ipath, sizeof(IndexPath));
+				rel->loose_pathlist = lappend(rel->loose_pathlist, loose_path);
+			}
+
 			/* If appropriate, consider parallel index scan */
 			if (index->amcanparallel &&
 				rel->consider_parallel && outer_relids == NULL &&

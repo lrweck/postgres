@@ -1744,6 +1744,139 @@ _bt_steppage(IndexScanDesc scan, ScanDirection dir)
 }
 
 /*
+ * _bt_looseskip_backward() -- backward-scan counterpart of _bt_looseskip()
+ *
+ * On entry the current page is pinned and locked, key is a comparison key over
+ * the group's leading columns, and so->currPos.itemIndex points at the tuple
+ * just returned (the last item of the group in index order).  Position the
+ * scan on the first item of the group, so that the next _bt_next() call
+ * (which decrements itemIndex) lands on the previous group.
+ */
+static bool
+_bt_looseskip_backward(IndexScanDesc scan, BTScanInsert key, Page page)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	Relation	rel = scan->indexRelation;
+	BTPageOpaque opaque;
+	BlockNumber blkno;
+	int			lo,
+				hi;
+
+	/* Find the first item of this group on the current page */
+	lo = so->currPos.firstItem;
+	hi = so->currPos.itemIndex;
+	while (lo < hi)
+	{
+		int			mid = lo + (hi - lo) / 2;
+
+		if (_bt_compare(rel, key, page,
+						so->currPos.items[mid].indexOffset) == 0)
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+
+	if (lo > so->currPos.firstItem || !so->currPos.moreLeft)
+	{
+		so->currPos.itemIndex = lo;
+		_bt_unlockbuf(rel, so->currPos.buf);
+		pfree(key);
+		return true;
+	}
+
+	/* The group continues onto the previous page.  Save bookkeeping first. */
+	so->currPos.itemIndex = lo;
+	_bt_unlockbuf(rel, so->currPos.buf);
+	if (so->numKilled > 0)
+		_bt_killitems(scan);
+	_bt_savemark(scan);
+
+	blkno = so->currPos.prevPage;
+	BTScanPosUnpinIfPinned(so->currPos);
+
+	while (blkno != P_NONE)
+	{
+		OffsetNumber minoff;
+
+		so->currPos.buf = _bt_getbuf(rel, blkno, BT_READ);
+		page = BufferGetPage(so->currPos.buf);
+		opaque = BTPageGetOpaque(page);
+
+		if (P_IGNORE(opaque))
+		{
+			blkno = opaque->btpo_prev;
+			_bt_relbuf(rel, so->currPos.buf);
+			so->currPos.buf = InvalidBuffer;
+			continue;
+		}
+
+		PredicateLockPage(rel, blkno, scan->xs_snapshot);
+		minoff = P_FIRSTDATAKEY(opaque);
+
+		/*
+		 * If the first data item still has our group's leading values, every
+		 * item on the page does: the page sits to the left of the group, and
+		 * keys are ordered.  Skip it without building items[].
+		 */
+		if (P_LEFTMOST(opaque) ||
+			_bt_compare(rel, key, page, minoff) != 0)
+		{
+			/* Boundary page: the group starts here (or on the right) */
+			so->currPos.moreLeft = true;
+			if (!_bt_readpage(scan, BackwardScanDirection,
+							  PageGetMaxOffsetNumber(page), false))
+			{
+				/* No matching tuples here; the next _bt_next() steps left */
+				so->currPos.itemIndex = so->currPos.firstItem;
+				_bt_drop_lock_and_maybe_pin(rel, so);
+				pfree(key);
+				return true;
+			}
+
+			page = BufferGetPage(so->currPos.buf);
+			lo = so->currPos.firstItem;
+			hi = so->currPos.lastItem;
+			while (lo < hi)
+			{
+				int			mid = lo + (hi - lo) / 2;
+
+				if (_bt_compare(rel, key, page,
+								so->currPos.items[mid].indexOffset) == 0)
+					hi = mid;
+				else
+					lo = mid + 1;
+			}
+
+			/*
+			 * Position on the first item of the group; if this page only has
+			 * older groups, position after its last item so the next fetch
+			 * returns that item (the previous group in backward order).
+			 */
+			if (_bt_compare(rel, key, page,
+							so->currPos.items[lo].indexOffset) == 0)
+				so->currPos.itemIndex = lo;
+			else
+				so->currPos.itemIndex = so->currPos.lastItem + 1;
+
+			_bt_drop_lock_and_maybe_pin(rel, so);
+			pfree(key);
+			return true;
+		}
+
+		/* Whole page is in the current group */
+		blkno = opaque->btpo_prev;
+		_bt_relbuf(rel, so->currPos.buf);
+		so->currPos.buf = InvalidBuffer;
+	}
+
+	/* Group runs to the start of the index; end the scan next fetch */
+	so->skipdone = true;
+	BTScanPosInvalidate(so->currPos);
+	pfree(key);
+	return true;
+}
+
+/*
  *	_bt_looseskip() -- skip the rest of the current DISTINCT group
  *
  * The executor calls this (via index_skip_group()) after a tuple returned by
@@ -1811,6 +1944,9 @@ _bt_looseskip(IndexScanDesc scan)
 	key = _bt_mkscankey(rel, itup);
 	key->keysz = so->nskipatts;
 	key->scantid = NULL;
+
+	if (so->currPos.dir == BackwardScanDirection)
+		return _bt_looseskip_backward(scan, key, page);
 
 	/*
 	 * Array (ScalarArrayOp) keys track their own progress through the index

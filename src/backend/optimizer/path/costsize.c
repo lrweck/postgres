@@ -846,6 +846,10 @@ cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
 	double		spc_seq_page_cost;
 	double		walk_pages;
 	double		cpu_per_group;
+	double		index_rows;
+	double		pass_sel;
+	double		rows_per_group;
+	double		scanned;
 	Cost		startup_cost;
 	Cost		walk_cost;
 	Cost		descend_cost;
@@ -887,22 +891,61 @@ cost_skipscan_index(IndexPath *path, PlannerInfo *root, double numGroups,
 		baserel->baserestrictcost.per_tuple +
 		cpu_tuple_cost;
 
+	/*
+	 * If the scan still has qpquals, a group may need several entries before
+	 * one passes.  Estimate how many entries we actually look at: the pass
+	 * fraction is rows-after-all-quals / rows-after-index-quals, and a group
+	 * has index_rows / numGroups entries on average.
+	 */
+	index_rows = baserel->tuples * path->indexselectivity;
+	pass_sel = 1.0;
+	rows_per_group = 1.0;
+	if (index_rows > 0.0 && numGroups > 0.0)
+	{
+		pass_sel = path->path.rows / index_rows;
+		pass_sel = Max(pass_sel, 1e-6);
+		pass_sel = Min(pass_sel, 1.0);
+		rows_per_group = index_rows / numGroups;
+		/*
+		 * With qpquals we cannot know where in the group the first passing
+		 * entry is: the filter may be correlated with the index order.  Be
+		 * conservative and charge the whole group; the loose scan then only
+		 * wins when a full index scan is cheaper than the alternatives.
+		 */
+		if (pass_sel >= 1.0)
+			rows_per_group = Min(rows_per_group, 1.0);
+		rows_per_group = Max(rows_per_group, 1.0);
+	}
+	scanned = numGroups * rows_per_group;
+	if (index_rows > 0.0)
+		scanned = Min(scanned, index_rows);
+
+
 	walk_cost = walk_pages * spc_random_page_cost +
-		numGroups * cpu_per_group;
+		scanned * cpu_per_group;
 	descend_cost = numGroups * spc_random_page_cost +
 		numGroups * Max(1, index->tree_height) * cpu_operator_cost +
-		numGroups * cpu_per_group;
+		scanned * cpu_per_group;
 
 	*descend = (descend_cost < walk_cost);
-	run_cost = *descend ? descend_cost : walk_cost;
+	if (path->indexscandir != ForwardScanDirection)
+	{
+		/* Backward loose scans currently always use the leaf walk */
+		*descend = false;
+		run_cost = walk_cost;
+	}
+	else
+		run_cost = *descend ? descend_cost : walk_cost;
 
 	/*
-	 * A plain index scan fetches a heap tuple per group, unlike an index-only
-	 * scan.  Charge one random heap page per group; a loose scan cannot do
-	 * better than one fetch per returned row.
+	 * Heap access: a plain scan fetches every entry it examines; an
+	 * index-only scan still consults the VM for each one.
 	 */
 	if (path->path.pathtype != T_IndexOnlyScan)
-		run_cost += numGroups * spc_random_page_cost;
+		run_cost += scanned * spc_random_page_cost;
+	else
+		run_cost += scanned * (1.0 - baserel->allvisfrac) *
+			spc_random_page_cost;
 
 	path->path.rows = numGroups;
 	path->indexselectivity = Min(1.0, numGroups / Max(1.0, baserel->tuples));
