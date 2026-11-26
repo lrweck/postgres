@@ -7988,6 +7988,24 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 		stadistinct = -1.0 * (1.0 - stanullfrac);
 
 	/*
+	 * A restricted relation cannot yield more distinct values of a column
+	 * than it yields rows.  pg_statistic describes the whole table, so cap
+	 * the estimate by the relation's own size; otherwise a filtered
+	 * dimension offers a domain it does not have, and joins against it come
+	 * out too small.  Skip the cap while the relation size is still unknown.
+	 */
+	if (vardata->rel && vardata->rel->rows > 0.0)
+	{
+		double		relrows = vardata->rel->rows;
+
+		if (stadistinct > 0.0)
+			return clamp_row_est(Min(stadistinct, relrows));
+		if (stadistinct < 0.0)
+			return clamp_row_est(Min(-stadistinct * vardata->rel->tuples,
+									  relrows));
+	}
+
+	/*
 	 * If we had an absolute estimate, use that.
 	 */
 	if (stadistinct > 0.0)
@@ -8821,7 +8839,7 @@ genericcostestimate(PlannerInfo *root,
 	 * CPU cost: any complex expressions in the indexquals will need to be
 	 * evaluated once at the start of the scan to reduce them to runtime keys
 	 * to pass to the index AM (see nodeIndexscan.c).  We model the per-tuple
-	 * CPU costs as cpu_index_tuple_cost plus one cpu_operator_cost per
+	 * CPU costs as cpu_index_tuple_cost plus one COST_OP_INDEX per
 	 * indexqual operator.  Because we have numIndexTuples as a per-scan
 	 * number, we have to multiply by num_sa_scans to get the correct result
 	 * for ScalarArrayOpExpr cases.  Similarly add in costs for any index
@@ -8833,7 +8851,7 @@ genericcostestimate(PlannerInfo *root,
 	 */
 	qual_arg_cost = index_other_operands_eval_cost(root, indexQuals) +
 		index_other_operands_eval_cost(root, indexOrderBys);
-	qual_op_cost = cpu_operator_cost *
+	qual_op_cost = COST_OP_INDEX *
 		(list_length(indexQuals) + list_length(indexOrderBys));
 
 	indexStartupCost = qual_arg_cost;
@@ -9377,7 +9395,7 @@ btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	if (index->tuples > 1)		/* avoid computing log(0) */
 	{
-		descentCost = ceil(log(index->tuples) / log(2.0)) * cpu_operator_cost;
+		descentCost = ceil(log(index->tuples) / log(2.0)) * COST_OP_DESCENT;
 		costs.indexStartupCost += descentCost;
 		costs.indexTotalCost += costs.num_sa_scans * descentCost;
 	}
@@ -9393,7 +9411,7 @@ btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * we charge for the leaf page too).  As above, charge once per estimated
 	 * SAOP/skip array descent.
 	 */
-	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * COST_OP_DESCENT;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -9500,7 +9518,7 @@ gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	if (index->tuples > 1)		/* avoid computing log(0) */
 	{
-		descentCost = ceil(log(index->tuples)) * cpu_operator_cost;
+		descentCost = ceil(log(index->tuples)) * COST_OP_DESCENT;
 		costs.indexStartupCost += descentCost;
 		costs.indexTotalCost += costs.num_sa_scans * descentCost;
 	}
@@ -9508,7 +9526,7 @@ gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	/*
 	 * Likewise add a per-page charge, calculated the same as for btrees.
 	 */
-	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * COST_OP_DESCENT;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -9558,7 +9576,7 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	if (index->tuples > 1)		/* avoid computing log(0) */
 	{
-		descentCost = ceil(log(index->tuples)) * cpu_operator_cost;
+		descentCost = ceil(log(index->tuples)) * COST_OP_DESCENT;
 		costs.indexStartupCost += descentCost;
 		costs.indexTotalCost += costs.num_sa_scans * descentCost;
 	}
@@ -9566,7 +9584,7 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	/*
 	 * Likewise add a per-page charge, calculated the same as for btrees.
 	 */
-	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * COST_OP_DESCENT;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -10249,7 +10267,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * those.
 	 */
 	qual_arg_cost = index_other_operands_eval_cost(root, indexQuals);
-	qual_op_cost = cpu_operator_cost * list_length(indexQuals);
+	qual_op_cost = COST_OP_INDEX * list_length(indexQuals);
 
 	*indexStartupCost += qual_arg_cost;
 	*indexTotalCost += qual_arg_cost;

@@ -190,6 +190,14 @@ static void get_restriction_qual_cost(PlannerInfo *root, RelOptInfo *baserel,
 static bool has_indexed_join_quals(NestPath *path);
 static double approx_tuple_count(PlannerInfo *root, JoinPath *path,
 								 List *quals);
+static double join_key_domain_factor(PlannerInfo *root,
+									 RelOptInfo *outer_rel,
+									 RelOptInfo *inner_rel,
+									 List *restrictlist);
+static void set_joinrel_distinct_cap(PlannerInfo *root, RelOptInfo *rel,
+									 RelOptInfo *outer_rel,
+									 RelOptInfo *inner_rel,
+									 List *restrictlist);
 static double calc_joinrel_size_estimate(PlannerInfo *root,
 										 RelOptInfo *joinrel,
 										 RelOptInfo *outer_rel,
@@ -308,7 +316,7 @@ cost_seqscan(Path *path, PlannerInfo *root,
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 	cpu_run_cost = cpu_per_tuple * baserel->tuples;
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->pathtarget->cost.startup;
@@ -407,7 +415,7 @@ cost_samplescan(Path *path, PlannerInfo *root,
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 	run_cost += cpu_per_tuple * baserel->tuples;
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->pathtarget->cost.startup;
@@ -731,7 +739,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 
 			rand_heap_pages = accesses;
 			max_IO_cost = misses * spc_random_page_cost +
-				Max(accesses - misses, 0.0) * cpu_tuple_cost;
+				Max(accesses - misses, 0.0) * COST_ROW_SCAN;
 		}
 
 		/*
@@ -835,15 +843,53 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	/*
 	 * Estimate CPU costs per tuple.
 	 *
-	 * What we want here is cpu_tuple_cost plus the evaluation costs of any
+	 * What we want here is COST_ROW_SCAN plus the evaluation costs of any
 	 * qual clauses that we have to evaluate as qpquals.
 	 */
 	cost_qual_eval(&qpqual_cost, qpquals, root);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 
 	cpu_run_cost += cpu_per_tuple * tuples_fetched;
+
+	/*
+	 * Measured: a repeated probe into a relation that does not fit in the
+	 * cache touches several random pages per execution (btree descent plus
+	 * heap), while the cache model assumes they are resident.  Charge the
+	 * extra pages in proportion to the part of the relation that misses.
+	 */
+	if (loop_count > 1 && effective_cache_size > 0)
+	{
+		double		cache = (double) effective_cache_size;
+		double		tuples_per_page;
+		double		heap_pages;
+		double		miss_heap;
+		double		miss_idx;
+		double		tree_h;
+
+		/*
+		 * Model cache residency per structure, with the LRU-like curve
+		 * pages / (pages + cache) instead of a step at the cache size.  The
+		 * index is usually small and warm; the heap is what misses.  The
+		 * probe touches tree_height index pages plus the heap pages that
+		 * hold the rows it returns.
+		 */
+		tuples_per_page = (baserel->tuples > 0 && baserel->pages > 0)
+			? baserel->tuples / (double) baserel->pages : 50.0;
+		heap_pages = ceil(tuples_fetched / tuples_per_page);
+		if (heap_pages < 1.0)
+			heap_pages = 1.0;
+
+		miss_heap = (double) baserel->pages /
+			((double) baserel->pages + cache);
+		miss_idx = (double) index->pages /
+			((double) index->pages + cache);
+		tree_h = (index->tree_height > 0) ? index->tree_height : 1;
+
+		run_cost += random_page_cost *
+			(tree_h * miss_idx + heap_pages * miss_heap);
+	}
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->path.pathtarget->cost.startup;
@@ -1125,7 +1171,7 @@ cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 	cpu_run_cost = cpu_per_tuple * tuples_fetched;
 
 	/* Adjust costing for parallelism, if used. */
@@ -1373,7 +1419,7 @@ cost_tidscan(Path *path, PlannerInfo *root,
 
 	/* XXX currently we assume TID quals are a subset of qpquals */
 	startup_cost += qpqual_cost.startup + tid_qual_cost.per_tuple;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple -
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple -
 		tid_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * ntuples;
 
@@ -1650,7 +1696,7 @@ cost_functionscan(Path *path, PlannerInfo *root,
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 	run_cost += cpu_per_tuple * baserel->tuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
@@ -1711,7 +1757,7 @@ cost_tablefuncscan(Path *path, PlannerInfo *root,
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 	run_cost += cpu_per_tuple * baserel->tuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
@@ -1763,8 +1809,9 @@ cost_valuesscan(Path *path, PlannerInfo *root,
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple += cpu_tuple_cost + qpqual_cost.per_tuple;
-	run_cost += cpu_per_tuple * baserel->tuples;
+	cpu_per_tuple += COST_ROW_SCAN + qpqual_cost.per_tuple;
+	cpu_per_tuple += COST_ROW_SCAN * 4.0;	/* tuplestore copy per row read */
+	run_cost += cpu_per_tuple * path->rows;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->pathtarget->cost.startup;
@@ -1810,19 +1857,19 @@ cost_ctescan(Path *path, PlannerInfo *root,
 
 	/*
 	 * A CTE scan reads from a tuplestore, which copies each tuple into a slot
-	 * rather than fetching it from a heap.  Measured on 2.9 M rows, that is
-	 * 0.21 us per row against 0.042 us for the same rows from a heap scan, so
-	 * charge five times the heap per-tuple cost for the manipulation.  The
-	 * ordinary tuple cost is still charged below, for the scan itself.
+	 * rather than fetching it from a heap.  Charge that per row actually
+	 * pulled from the store: a CTE scanned with a LIMIT or under a nested
+	 * loop reads only a fraction of what was materialized.
 	 */
-	cpu_per_tuple = cpu_tuple_cost * 5.0;
+	cpu_per_tuple = COST_ROW_SCAN;
 
 	/* Add scanning CPU costs */
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple += cpu_tuple_cost + qpqual_cost.per_tuple;
-	run_cost += cpu_per_tuple * baserel->tuples;
+	cpu_per_tuple += COST_ROW_SCAN + qpqual_cost.per_tuple;
+	/* charge the rows actually pulled from the tuplestore */
+	run_cost += cpu_per_tuple * path->rows;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->pathtarget->cost.startup;
@@ -1861,13 +1908,13 @@ cost_namedtuplestorescan(Path *path, PlannerInfo *root,
 		path->rows = baserel->rows;
 
 	/* Charge one CPU tuple cost per row for tuplestore manipulation */
-	cpu_per_tuple = cpu_tuple_cost;
+	cpu_per_tuple = COST_ROW_SCAN;
 
 	/* Add scanning CPU costs */
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple += cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple += COST_ROW_SCAN + qpqual_cost.per_tuple;
 	run_cost += cpu_per_tuple * baserel->tuples;
 
 	if (path->parallel_workers == 0)
@@ -1902,11 +1949,11 @@ cost_resultscan(Path *path, PlannerInfo *root,
 	else
 		path->rows = baserel->rows;
 
-	/* We charge qual cost plus cpu_tuple_cost */
+	/* We charge qual cost plus COST_ROW_SCAN */
 	get_restriction_qual_cost(root, baserel, param_info, &qpqual_cost);
 
 	startup_cost += qpqual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qpqual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_SCAN + qpqual_cost.per_tuple;
 	run_cost += cpu_per_tuple * baserel->tuples;
 
 	if (path->parallel_workers == 0)
@@ -1947,11 +1994,11 @@ cost_recursive_union(Path *runion, Path *nrterm, Path *rterm)
 	total_rows += 10 * rterm->rows;
 
 	/*
-	 * Also charge cpu_tuple_cost per row to account for the costs of
+	 * Also charge COST_ROW_SCAN per row to account for the costs of
 	 * manipulating the tuplestores.  (We don't worry about possible
 	 * spill-to-disk costs.)
 	 */
-	total_cost += cpu_tuple_cost * total_rows;
+	total_cost += COST_ROW_SCAN * total_rows;
 
 	if (runion->parallel_workers == 0)
 		enable_mask |= PGS_CONSIDER_NONPARTIAL;
@@ -2233,13 +2280,13 @@ cost_incremental_sort(Path *path,
 	 * detect the sort groups. This is roughly equal to one extra copy and
 	 * comparison per tuple.
 	 */
-	run_cost += (cpu_tuple_cost + comparison_cost) * input_tuples;
+	run_cost += (COST_ROW_SORT + comparison_cost) * input_tuples;
 
 	/*
-	 * Additionally, we charge double cpu_tuple_cost for each input group to
+	 * Additionally, we charge double COST_ROW_SORT for each input group to
 	 * account for the tuplesort_reset that's performed after each group.
 	 */
-	run_cost += 2.0 * cpu_tuple_cost * input_groups;
+	run_cost += 2.0 * COST_ROW_SORT * input_groups;
 
 	path->rows = input_tuples;
 
@@ -2446,6 +2493,7 @@ cost_sort(Path *path, PlannerInfo *root,
 	path->disabled_nodes = input_disabled_nodes + (enable_sort ? 0 : 1);
 	path->startup_cost = startup_cost;
 	path->total_cost = startup_cost + run_cost;
+
 }
 
 /*
@@ -2829,7 +2877,7 @@ cost_material(Path *path,
 	 * nestloop with A outer, materialized B inner and nestloop with B outer,
 	 * materialized A inner.  The extra cost ensures we'll prefer
 	 * materializing the smaller rel.)	Note that this is normally a good deal
-	 * less than cpu_tuple_cost; which is OK because a Material plan node
+	 * less than COST_ROW_SORT; which is OK because a Material plan node
 	 * doesn't do qual-checking or projection, so it's got less overhead than
 	 * most plan nodes.
 	 */
@@ -3041,11 +3089,11 @@ cost_agg(Path *path, PlannerInfo *root,
 	 * is charged once per output tuple, corresponding to the costs of
 	 * evaluating the finalfns.  Startup costs are of course charged but once.
 	 *
-	 * If we are grouping, we charge an additional cpu_operator_cost per
+	 * If we are grouping, we charge an additional COST_OP_AGG per
 	 * grouping column per input tuple for grouping comparisons.
 	 *
 	 * We will produce a single output tuple if not grouping, and a tuple per
-	 * group otherwise.  We charge cpu_tuple_cost for each output tuple.
+	 * group otherwise.  We charge COST_ROW_AGG for each output tuple.
 	 *
 	 * Note: in this cost model, AGG_SORTED and AGG_HASHED have exactly the
 	 * same total CPU cost, but AGG_SORTED has lower startup cost.  If the
@@ -3064,7 +3112,7 @@ cost_agg(Path *path, PlannerInfo *root,
 		startup_cost += aggcosts->finalCost.startup;
 		startup_cost += aggcosts->finalCost.per_tuple;
 		/* we aren't grouping */
-		total_cost = startup_cost + cpu_tuple_cost;
+		total_cost = startup_cost + COST_ROW_AGG;
 		output_tuples = 1;
 
 		/* AGG_PLAIN neither hashes nor sorts, so neither switch disables it */
@@ -3077,10 +3125,10 @@ cost_agg(Path *path, PlannerInfo *root,
 		/* calcs phrased this way to match HASHED case, see note above */
 		total_cost += aggcosts->transCost.startup;
 		total_cost += aggcosts->transCost.per_tuple * input_tuples;
-		total_cost += (cpu_operator_cost * numGroupCols) * input_tuples;
+		total_cost += (COST_OP_AGG * numGroupCols) * input_tuples;
 		total_cost += aggcosts->finalCost.startup;
 		total_cost += aggcosts->finalCost.per_tuple * numGroups;
-		total_cost += cpu_tuple_cost * numGroups;
+		total_cost += COST_ROW_AGG * numGroups;
 		output_tuples = numGroups;
 
 		/*
@@ -3110,13 +3158,13 @@ cost_agg(Path *path, PlannerInfo *root,
 		startup_cost += aggcosts->transCost.startup;
 		startup_cost += aggcosts->transCost.per_tuple * input_tuples;
 		/* cost of computing hash value */
-		startup_cost += (cpu_operator_cost * numGroupCols) * input_tuples;
+		startup_cost += (COST_OP_AGG * numGroupCols) * input_tuples;
 		startup_cost += aggcosts->finalCost.startup;
 
 		total_cost = startup_cost;
 		total_cost += aggcosts->finalCost.per_tuple * numGroups;
 		/* cost of retrieving from hash table */
-		total_cost += cpu_tuple_cost * numGroups;
+		total_cost += COST_ROW_AGG * numGroups;
 		output_tuples = numGroups;
 
 		/* AGG_HASHED is disabled when enable_hashagg is off */
@@ -3193,7 +3241,7 @@ cost_agg(Path *path, PlannerInfo *root,
 		total_cost += pages_read * seq_page_cost;
 
 		/* account for CPU cost of spilling a tuple and reading it back */
-		spill_cost = depth * input_tuples * 2.0 * cpu_tuple_cost;
+		spill_cost = depth * input_tuples * 2.0 * COST_ROW_AGG;
 		startup_cost += spill_cost;
 		total_cost += spill_cost;
 	}
@@ -3509,15 +3557,15 @@ cost_windowagg(Path *path, PlannerInfo *root,
 	}
 
 	/*
-	 * We also charge cpu_operator_cost per grouping column per tuple for
-	 * grouping comparisons, plus cpu_tuple_cost per tuple for general
+	 * We also charge COST_OP_AGG per grouping column per tuple for
+	 * grouping comparisons, plus COST_ROW_AGG per tuple for general
 	 * overhead.
 	 *
 	 * XXX this neglects costs of spooling the data to disk when it overflows
 	 * work_mem.  Sooner or later that should get accounted for.
 	 */
-	total_cost += cpu_operator_cost * (numPartCols + numOrderCols) * input_tuples;
-	total_cost += cpu_tuple_cost * input_tuples;
+	total_cost += COST_OP_AGG * (numPartCols + numOrderCols) * input_tuples;
+	total_cost += COST_ROW_AGG * input_tuples;
 
 	path->rows = input_tuples;
 	path->disabled_nodes = input_disabled_nodes;
@@ -3565,10 +3613,10 @@ cost_group(Path *path, PlannerInfo *root,
 	total_cost = input_total_cost;
 
 	/*
-	 * Charge one cpu_operator_cost per comparison per input tuple. We assume
+	 * Charge one COST_OP_AGG per comparison per input tuple. We assume
 	 * all columns get compared at most of the tuples.
 	 */
-	total_cost += cpu_operator_cost * input_tuples * numGroupCols;
+	total_cost += COST_OP_AGG * input_tuples * numGroupCols;
 
 	/*
 	 * If there are quals (HAVING quals), account for their cost and
@@ -3862,15 +3910,15 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	/* CPU costs */
 	cost_qual_eval(&restrict_qual_cost, path->jpath.joinrestrictinfo, root);
 	startup_cost += restrict_qual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + restrict_qual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_JOIN + restrict_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * ntuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
 	startup_cost += path->jpath.path.pathtarget->cost.startup;
 	run_cost += path->jpath.path.pathtarget->cost.per_tuple * path->jpath.path.rows;
-
 	path->jpath.path.startup_cost = startup_cost;
 	path->jpath.path.total_cost = startup_cost + run_cost;
+
 }
 
 /*
@@ -4337,8 +4385,8 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 
 	/*
 	 * When we interpose a Material node the re-fetch cost is assumed to be
-	 * just cpu_operator_cost per tuple, independently of the underlying
-	 * plan's cost; and we charge an extra cpu_operator_cost per original
+	 * just COST_OP_JOIN per tuple, independently of the underlying
+	 * plan's cost; and we charge an extra COST_OP_JOIN per original
 	 * fetch as well.  Note that we're assuming the materialize node will
 	 * never spill to disk, since it only has to remember tuples back to the
 	 * last mark.  (If there are a huge number of duplicates, our other cost
@@ -4349,7 +4397,7 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 	 * of the generated Material node.
 	 */
 	mat_inner_cost = inner_run_cost +
-		cpu_operator_cost * inner_rows * rescanratio;
+		COST_OP_JOIN * inner_rows * rescanratio;
 
 	/*
 	 * If we don't need mark/restore at all, we don't need materialization.
@@ -4444,7 +4492,7 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 
 	/*
 	 * For each tuple that gets through the mergejoin proper, we charge
-	 * cpu_tuple_cost plus the cost of evaluating additional restriction
+	 * COST_ROW_JOIN plus the cost of evaluating additional restriction
 	 * clauses that are to be applied at the join.  (This is pessimistic since
 	 * not all of the quals may get evaluated at each tuple.)
 	 *
@@ -4452,7 +4500,7 @@ final_cost_mergejoin(PlannerInfo *root, MergePath *path,
 	 * evaluations here, but it's probably not worth the trouble.
 	 */
 	startup_cost += qp_qual_cost.startup;
-	cpu_per_tuple = cpu_tuple_cost + qp_qual_cost.per_tuple;
+	cpu_per_tuple = COST_ROW_JOIN + qp_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * mergejointuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
@@ -4581,17 +4629,17 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 
 	/*
 	 * Cost of computing hash function: must do it once per input tuple. We
-	 * charge one cpu_operator_cost for each column's hash function.  Also,
-	 * tack on one cpu_tuple_cost per inner row, to model the costs of
+	 * charge one COST_OP_JOIN for each column's hash function.  Also,
+	 * tack on one COST_ROW_JOIN per inner row, to model the costs of
 	 * inserting the row into the hashtable.
 	 *
 	 * XXX when a hashclause is more complex than a single operator, we really
 	 * should charge the extra eval costs of the left or right side, as
 	 * appropriate, here.  This seems more work than it's worth at the moment.
 	 */
-	startup_cost += (cpu_operator_cost * num_hashclauses + cpu_tuple_cost)
+	startup_cost += (COST_OP_JOIN * num_hashclauses + COST_ROW_JOIN)
 		* inner_path_rows;
-	run_cost += cpu_operator_cost * num_hashclauses * outer_path_rows;
+	run_cost += COST_OP_JOIN * num_hashclauses * outer_path_rows;
 
 	/*
 	 * If this is a parallel hash build, then the value we have for
@@ -4935,7 +4983,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 
 	/*
 	 * For each tuple that gets through the hashjoin proper, we charge
-	 * cpu_tuple_cost plus the cost of evaluating additional restriction
+	 * COST_ROW_JOIN plus the cost of evaluating additional restriction
 	 * clauses that are to be applied at the join.
 	 *
 	 * For plain joins, all these quals are charged at each hashjointuples
@@ -4950,7 +4998,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	 *
 	 * A RIGHT_ANTI join has no such short-circuit, so its non-hashed
 	 * joinquals are evaluated for every tuple passing the hash quals.  Charge
-	 * them on that count, and only cpu_tuple_cost on hashjointuples.  (This
+	 * them on that count, and only COST_ROW_JOIN on hashjointuples.  (This
 	 * overcharges any pushed-down clauses, which are evaluated just once per
 	 * emitted row, but such clauses are rare at a right anti join.)
 	 */
@@ -4966,11 +5014,11 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 			joinqual_tuples = approx_tuple_count(root, &path->jpath,
 												 hashclauses);
 		run_cost += qp_qual_cost.per_tuple * joinqual_tuples;
-		run_cost += cpu_tuple_cost * hashjointuples;
+		run_cost += COST_ROW_JOIN * hashjointuples;
 	}
 	else
 	{
-		cpu_per_tuple = cpu_tuple_cost + qp_qual_cost.per_tuple;
+		cpu_per_tuple = COST_ROW_JOIN + qp_qual_cost.per_tuple;
 		run_cost += cpu_per_tuple * hashjointuples;
 	}
 
@@ -5916,6 +5964,8 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										   inner_rel->rows,
 										   sjinfo,
 										   restrictlist);
+
+	set_joinrel_distinct_cap(root, rel, outer_rel, inner_rel, restrictlist);
 }
 
 /*
@@ -5963,6 +6013,186 @@ get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo *rel,
 	if (nrows > rel->rows)
 		nrows = rel->rows;
 	return nrows;
+}
+
+/*
+ * join_var_cap
+ *		Apply the distinct-row bound an input join relation carries for this
+ *		variable's relation.
+ */
+static double
+join_var_cap(Var *var, RelOptInfo *outer_rel, RelOptInfo *inner_rel,
+			 double nd)
+{
+	RelOptInfo *input;
+
+	if (bms_is_member(var->varno, outer_rel->relids))
+		input = outer_rel;
+	else if (bms_is_member(var->varno, inner_rel->relids))
+		input = inner_rel;
+	else
+		return nd;
+
+	if (input->join_cap_varno == var->varno && input->join_cap_rows > 0)
+		nd = Min(nd, input->join_cap_rows);
+
+	return nd;
+}
+
+/*
+ * join_key_domain_factor
+ *		Factor by which an equality join is undercounted because the domain of
+ *		its columns is smaller than the base ndistinct claims.
+ */
+static double
+join_key_domain_factor(PlannerInfo *root,
+					   RelOptInfo *outer_rel,
+					   RelOptInfo *inner_rel,
+					   List *restrictlist)
+{
+	ListCell   *lc;
+	double		factor = 1.0;
+
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		Node	   *clause;
+		Var		   *var1;
+		Var		   *var2;
+		VariableStatData vardata;
+		double		nd1,
+					nd2,
+					cap1,
+					cap2;
+		bool		isdefault;
+
+		if (!rinfo->can_join || !is_opclause(rinfo->clause))
+			continue;
+		if (rinfo->mergeopfamilies == NIL)
+			continue;
+
+		clause = (Node *) rinfo->clause;
+		var1 = (Var *) get_leftop(clause);
+		var2 = (Var *) get_rightop(clause);
+		if (!var1 || !var2 || !IsA(var1, Var) || !IsA(var2, Var))
+			continue;
+		if (var1->varattno <= 0 || var2->varattno <= 0)
+			continue;
+
+		examine_variable(root, (Node *) var1, 0, &vardata);
+		nd1 = get_variable_numdistinct(&vardata, &isdefault);
+		ReleaseVariableStats(vardata);
+		examine_variable(root, (Node *) var2, 0, &vardata);
+		nd2 = get_variable_numdistinct(&vardata, &isdefault);
+		ReleaseVariableStats(vardata);
+
+		cap1 = join_var_cap(var1, outer_rel, inner_rel, nd1);
+		cap2 = join_var_cap(var2, outer_rel, inner_rel, nd2);
+
+		if (cap1 < nd1 || cap2 < nd2)
+			factor *= Max(nd1, nd2) / Max(cap1, cap2);
+	}
+
+	return factor;
+}
+
+/*
+ * set_joinrel_distinct_cap
+ *		Record how many distinct rows of a base relation this join can offer.
+ *
+ * When one side of an equality is a unique key, every column of that side is
+ * determined by the key, so the join cannot contain more distinct rows of
+ * that relation than the other side has distinct key values.
+ */
+static void
+set_joinrel_distinct_cap(PlannerInfo *root, RelOptInfo *rel,
+						 RelOptInfo *outer_rel, RelOptInfo *inner_rel,
+						 List *restrictlist)
+{
+	ListCell   *lc;
+	Index		cap_varno = 0;
+	Cardinality cap_rows = 0;
+
+	if (outer_rel->reloptkind == RELOPT_JOINREL &&
+		outer_rel->join_cap_varno > 0)
+	{
+		cap_varno = outer_rel->join_cap_varno;
+		cap_rows = outer_rel->join_cap_rows;
+	}
+	if (inner_rel->reloptkind == RELOPT_JOINREL &&
+		inner_rel->join_cap_varno > 0)
+	{
+		if (cap_varno == 0 || inner_rel->join_cap_rows < cap_rows)
+		{
+			cap_varno = inner_rel->join_cap_varno;
+			cap_rows = inner_rel->join_cap_rows;
+		}
+	}
+
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		Node	   *clause;
+		Var		   *var1;
+		Var		   *var2;
+		RelOptInfo *rel1;
+		RelOptInfo *rel2;
+		VariableStatData vardata;
+		double		nd;
+		bool		isdefault;
+
+		if (!rinfo->can_join || !is_opclause(rinfo->clause))
+			continue;
+		if (rinfo->mergeopfamilies == NIL)
+			continue;
+
+		clause = (Node *) rinfo->clause;
+		var1 = (Var *) get_leftop(clause);
+		var2 = (Var *) get_rightop(clause);
+		if (!var1 || !var2 || !IsA(var1, Var) || !IsA(var2, Var))
+			continue;
+		if (var1->varattno <= 0 || var2->varattno <= 0)
+			continue;
+		if (var1->varno >= root->simple_rel_array_size ||
+			var2->varno >= root->simple_rel_array_size)
+			continue;
+
+		rel1 = root->simple_rel_array[var1->varno];
+		rel2 = root->simple_rel_array[var2->varno];
+		if (rel1 == NULL || rel2 == NULL)
+			continue;
+		if (rel1->reloptkind != RELOPT_BASEREL ||
+			rel2->reloptkind != RELOPT_BASEREL)
+			continue;
+
+		if (has_unique_index(rel1, var1->varattno))
+		{
+			examine_variable(root, (Node *) var2, 0, &vardata);
+			nd = get_variable_numdistinct(&vardata, &isdefault);
+			ReleaseVariableStats(vardata);
+			nd = Min(nd, rel1->rows);
+			if (cap_varno == 0 || nd < cap_rows)
+			{
+				cap_varno = var1->varno;
+				cap_rows = nd;
+			}
+		}
+		else if (has_unique_index(rel2, var2->varattno))
+		{
+			examine_variable(root, (Node *) var1, 0, &vardata);
+			nd = get_variable_numdistinct(&vardata, &isdefault);
+			ReleaseVariableStats(vardata);
+			nd = Min(nd, rel2->rows);
+			if (cap_varno == 0 || nd < cap_rows)
+			{
+				cap_varno = var2->varno;
+				cap_rows = nd;
+			}
+		}
+	}
+
+	rel->join_cap_varno = cap_varno;
+	rel->join_cap_rows = cap_rows;
 }
 
 /*
@@ -6769,10 +6999,22 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 		 */
 		if (jointype == JOIN_INNER)
 		{
+			double		corr;
+
 			selfsel = estimate_selfjoin_selectivity(root, outer_rel, inner_rel,
 													restrictlist);
 			if (selfsel >= 0.0)
 				jselec = selfsel;
+
+			/*
+			 * A relation attached through its unique key cannot offer more
+			 * distinct rows than the other side contributes values for that
+			 * key; its columns are limited accordingly.
+			 */
+			corr = join_key_domain_factor(root, outer_rel, inner_rel,
+										  restrictlist);
+			if (corr > 1.0)
+				jselec = Min(jselec * corr, 1.0);
 		}
 		pselec = 0.0;			/* not used, keep compiler quiet */
 	}

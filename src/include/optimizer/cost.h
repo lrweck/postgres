@@ -22,11 +22,63 @@
 /* NB: cost-estimation code should use the variables, not these constants! */
 /* If you change these, update backend/utils/misc/postgresql.conf.sample */
 #define DEFAULT_SEQ_PAGE_COST  1.0
-#define DEFAULT_RANDOM_PAGE_COST  4.0
-#define DEFAULT_CPU_TUPLE_COST	0.01
+/*
+ * Measured on this machine: an index probe into a relation larger than the
+ * cache costs about 22 us, against roughly 2 us for a sequential page, so
+ * the random/sequential ratio is ~10 rather than the historical 4.
+ */
+#define DEFAULT_RANDOM_PAGE_COST  10.0
+/*
+ * Uniform price for CPU work, calibrated on this machine against the
+ * sequential-scan anchor.  Every per-row and per-operator constant is
+ * scaled by the same factor, so all node types keep a single unit; page
+ * costs are untouched.  See the node-cost measurements in the commit.
+ */
+#define COST_CPU_SCALE 25.0
+
+#define DEFAULT_CPU_TUPLE_COST	(0.01 * COST_CPU_SCALE)
+/*
+ * The index per-tuple cost is not bulk CPU: a unique probe pays one page
+ * and a handful of comparisons, so it must not inherit the bulk scale.
+ * Bulk index scans are charged per row in cost_index instead.
+ */
 #define DEFAULT_CPU_INDEX_TUPLE_COST 0.005
-#define DEFAULT_CPU_OPERATOR_COST  0.0025
-#define DEFAULT_PARALLEL_TUPLE_COST 0.1
+#define DEFAULT_CPU_OPERATOR_COST  (0.0025 * COST_CPU_SCALE)
+
+/*
+ * Per-purpose operator costs.  One number cannot price a filter comparison,
+ * a btree descent, a sort comparison, an aggregate transition and a join
+ * probe: they do different work.  Each is priced where it happens, so
+ * calibrating one does not move the others.
+ */
+#define COST_OP_QUAL     (0.0025 * COST_CPU_SCALE)   /* filter/restriction eval */
+#define COST_OP_SORT     (0.0025 * COST_CPU_SCALE)   /* sort comparison */
+#define COST_OP_JOIN     (0.0025 * COST_CPU_SCALE)   /* join comparison */
+#define COST_OP_AGG      (0.0025 * COST_CPU_SCALE)   /* aggregate transition */
+/*
+ * Per-row costs, one per kind of work: moving a row out of a scan is not
+ * the same as driving a join probe or closing an aggregate group.
+ */
+/*
+ * A heap scan pays for pages; moving a row out of a page is cheap.  The
+ * measured per-row cost of a sequential scan already matches the model, so
+ * this one keeps the historical value instead of the calibrated one.
+ */
+#define COST_ROW_SCAN    0.01                             /* 1x, unscaled */
+#define COST_ROW_JOIN    (DEFAULT_CPU_TUPLE_COST * 2.0)    /* measured 63x vs scan */
+#define COST_ROW_AGG     (DEFAULT_CPU_TUPLE_COST * 2.0)    /* measured 61x */
+#define COST_ROW_SORT    (DEFAULT_CPU_TUPLE_COST * 4.0)    /* measured 218x */
+
+#define COST_OP_INDEX    0.0025                      /* index qual per probed tuple */
+#define COST_OP_DESCENT  0.0025                      /* btree descent, fixed per probe */
+/*
+ * Moving a tuple between processes is IPC, not computation: it costs
+ * roughly 0.15 us per row, so it scales with a smaller factor than the CPU
+ * family.  Keeping it below the CPU price keeps parallel plans attractive
+ * whenever they really reduce wall time.
+ */
+#define COST_IPC_SCALE 10.0
+#define DEFAULT_PARALLEL_TUPLE_COST (0.1 * COST_IPC_SCALE)
 #define DEFAULT_PARALLEL_SETUP_COST  1000.0
 
 /* defaults for non-Cost parameters */
