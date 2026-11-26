@@ -5945,15 +5945,15 @@ subquery_grouping_key(RelOptInfo *rel, Bitmapset **attnos)
 }
 
 /*
- * relation_has_composite_unique_index
- *		True if the relation has a unique index over two or more plain columns.
+ * relation_has_unique_key
+ *		True if the relation has a unique index over one or more plain columns.
  *
  * This is the cheap test that lets a join relation be dismissed before any work
  * is done on it: a relation without such an index can never bound a join by its
  * key, and most relations have no such index.
  */
 static bool
-relation_has_composite_unique_index(RelOptInfo *rel)
+relation_has_unique_key(RelOptInfo *rel)
 {
 	ListCell   *lc;
 
@@ -5963,7 +5963,7 @@ relation_has_composite_unique_index(RelOptInfo *rel)
 
 		if (index->unique && index->indexprs == NIL &&
 			(index->indpred == NIL || index->predOK) &&
-			index->nkeycolumns >= 2)
+			index->nkeycolumns >= 1)
 			return true;
 	}
 
@@ -6027,12 +6027,12 @@ joinrel_unique_key_selectivity(PlannerInfo *root,
 	double		nullfrac = 1.0;
 
 	if (uniquerel_rows <= 0.0 ||
-		list_length(restrictlist) < 2)
+		list_length(restrictlist) < 1)
 		return -1.0;
 
 	if (uniquerel->subroot == NULL &&
 		(uniquerel->reloptkind != RELOPT_BASEREL ||
-		 !relation_has_composite_unique_index(uniquerel)))
+		 !relation_has_unique_key(uniquerel)))
 		return -1.0;
 
 	keys = palloc_array(JoinUniqueKey, list_length(restrictlist));
@@ -6169,10 +6169,6 @@ joinrel_unique_key_selectivity(PlannerInfo *root,
 			continue;
 		if (index->indpred != NIL && !index->predOK)
 			continue;
-		/* Only composite keys need this; see the top of the function. */
-		if (index->nkeycolumns < 2)
-			continue;
-
 		for (i = 0; i < index->nkeycolumns; i++)
 		{
 			AttrNumber	attnum = index->indexkeys[i];
