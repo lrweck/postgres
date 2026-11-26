@@ -234,12 +234,6 @@ static RelOptInfo *create_final_distinct_paths(PlannerInfo *root,
 static List *get_useful_pathkeys_for_distinct(PlannerInfo *root,
 											  List *needed_pathkeys,
 											  List *path_pathkeys);
-static IndexPath *make_loose_scan_path(PlannerInfo *root,
-									   RelOptInfo *input_rel,
-									   Path *path,
-									   List *loosepathkeys,
-									   double numGroups,
-									   List *required_pathkeys);
 static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										PathTarget *target,
@@ -5413,10 +5407,11 @@ loose_leading_equalities(IndexPath *path)
  *	- every restriction clause is enforced exactly by the index (so there is
  *	  no qpqual that could reject the one row we keep per group).
  *
- * Used for plain DISTINCT, DISTINCT ON (where the outer Unique is a no-op) and
- * GROUP BY without aggregation.
+ * Used for plain DISTINCT, DISTINCT ON (where the outer Unique is a no-op),
+ * GROUP BY without aggregation, and the outer side of a semi/anti join that a
+ * plain DISTINCT above the join deduplicates.
  */
-static IndexPath *
+IndexPath *
 make_loose_scan_path(PlannerInfo *root, RelOptInfo *input_rel, Path *path,
 					 List *loosepathkeys, double numGroups,
 					 List *required_pathkeys)
