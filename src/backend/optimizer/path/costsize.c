@@ -87,8 +87,11 @@
 
 #include "access/amapi.h"
 #include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/tsmapi.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_statistic.h"
+#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
@@ -499,8 +502,13 @@ cost_gather_merge(GatherMergePath *path, PlannerInfo *root,
 	N = (double) path->num_workers + 1;
 	logN = LOG2(N);
 
-	/* Assumed cost per tuple comparison */
-	comparison_cost = 2.0 * cpu_operator_cost;
+	/*
+	 * Assumed cost per tuple comparison.  The heap merge compares with the
+	 * same ordering comparators a sort uses, so it pays the same extra
+	 * per-comparison cost.
+	 */
+	comparison_cost = 2.0 * cpu_operator_cost +
+		sort_comparison_cost(root, path->path.pathkeys);
 
 	/* Heap creation cost */
 	startup_cost += comparison_cost * N * logN;
@@ -1970,8 +1978,9 @@ cost_recursive_union(Path *runion, Path *nrterm, Path *rterm)
  * total, but we will also need to write and read each tuple once per
  * merge pass.  We expect about ceil(logM(r)) merge passes where r is the
  * number of initial runs formed and M is the merge order used by tuplesort.c.
- * Since the average initial run should be about sort_mem, we have
- *		disk traffic = 2 * relsize * ceil(logM(p / sort_mem))
+ * The number of runs follows from the in-memory footprint (see
+ * tuplesort_run_count()), so we have
+ *		disk traffic = 2 * relsize * ceil(logM(r))
  *		cpu = comparison_cost * t * log2(t)
  *
  * If the sort is bounded (i.e., only the first k result tuples are needed)
@@ -1981,10 +1990,11 @@ cost_recursive_union(Path *runion, Path *nrterm, Path *rterm)
  * The disk traffic is assumed to be 3/4ths sequential and 1/4th random
  * accesses (XXX can't we refine that guess?)
  *
- * By default, we charge two operator evals per tuple comparison, which should
- * be in the right ballpark in most cases.  The caller can tweak this by
- * specifying nonzero comparison_cost; typically that's used for any extra
- * work that has to be done to prepare the inputs to the comparison operators.
+ * The flat charge is two operator evals per tuple comparison, which is right
+ * for a type whose comparator is a single inline test.  Callers that know
+ * better add the comparator's own cost through comparison_cost (see
+ * sort_comparison_cost()); it is added to the flat charge, not substituted for
+ * it.
  *
  * 'tuples' is the number of tuples in the relation
  * 'width' is the average tuple width in bytes
@@ -2031,7 +2041,16 @@ cost_tuplesort(Cost *startup_cost, Cost *run_cost,
 		 * We'll have to use a disk-based sort of all the tuples
 		 */
 		double		npages = ceil(input_bytes / BLCKSZ);
-		double		nruns = input_bytes / sort_mem_bytes;
+
+		/*
+		 * The number of runs follows from the in-memory footprint, not from
+		 * the data volume alone: run generation also holds one SortTuple per
+		 * tuple, which is why dividing the data volume by sort_mem
+		 * underestimates the run count and, at a run-count boundary, the
+		 * merge passes.
+		 */
+		double		nruns = tuplesort_run_count(tuples, input_bytes,
+												sort_mem_bytes);
 		double		mergeorder = tuplesort_merge_order(sort_mem_bytes);
 		double		log_runs;
 		double		npageaccesses;
@@ -2119,6 +2138,8 @@ cost_incremental_sort(Path *path,
 	bool		unknown_varno = false;
 
 	Assert(presorted_keys > 0 && presorted_keys < list_length(pathkeys));
+
+	comparison_cost += sort_comparison_cost(root, pathkeys);
 
 	/*
 	 * We want to be sure the cost of a sort is never estimated as zero, even
@@ -2239,16 +2260,163 @@ cost_incremental_sort(Path *path,
 }
 
 /*
+ * sort_provider_cost_factor
+ *		Relative cost of comparing two values of the given collation.
+ *
+ * A sort of text uses abbreviated keys when the collation allows it, and falls
+ * back to the full collation-aware comparison when two abbreviations tie or
+ * when there are none.  Whether abbreviation is available at all is a property
+ * of the collation provider, and that is the first-order effect: measured on one
+ * machine, sorting 1M rows in memory with the same data, ICU costs 1.5x to 1.9x
+ * the C collation and the builtin provider costs about the same as C.
+ *
+ * The spread inside ICU is not the locale.  With the locale held fixed, data
+ * that collides at the primary level (accented Latin, for instance) costs more
+ * than data that does not, because the comparison has to descend into the
+ * secondary and tertiary weights.  How densely the data collides is not
+ * recorded in pg_statistic, so it is not modelled here and shows up as residual
+ * error.
+ *
+ * The factor returned multiplies cost_tuplesort()'s 2.0 * cpu_operator_cost per
+ * comparison.  Expressed on that component, reproducing the measured total time
+ * of a 1M-row sort needs roughly 1.4x to 4.4x depending on the provider and the
+ * data; 2.4 is close to their geometric mean, so no case is off by more than
+ * about 1.9x and the common case is centred.  Undercharging keeps today's
+ * plans; overcharging flips them for no reason, which is why this is centred
+ * rather than set to the worst case.
+ *
+ * A libc collation other than C or POSIX compares with strcoll() and gets no
+ * abbreviation either, so it is charged like ICU; it could not be measured here
+ * because the test environment has no non-C locales installed.
+ *
+ * Returns 1.0 whenever there is no evidence to charge more.
+ */
+static double
+sort_provider_cost_factor(Oid collid)
+{
+	if (!OidIsValid(collid))
+		return 1.0;
+
+	/* Builtin collations compare code points directly, without strcoll(). */
+	if (get_collation_provider(collid) == COLLPROVIDER_BUILTIN)
+		return 1.05;
+
+	return get_collation_is_c(collid) ? 1.0 : 2.4;
+}
+
+/*
+ * sort_comparison_cost
+ *	  Extra per-comparison cost of sorting on the given pathkeys.
+ *
+ * cost_tuplesort() charges a flat 2.0 * cpu_operator_cost per comparison for
+ * every type.  That is correct for a type whose comparator is a single inline
+ * test, and wrong for everything else: measured on one machine, sorting 1M rows
+ * of a wide table in memory (src/tools/measure_sort_cost.sql), the total time
+ * relative to int4 runs from about 1.0x for the fixed-length types to 2.4x for
+ * uuid, and the two types that share a 16-byte representation sit at 1.2x
+ * (interval) and 2.4x (uuid).  Neither the type's length nor the width of its
+ * values predicts that; it is a property of the comparison routine.
+ *
+ * A sort comparator is an ordinary function, and PostgreSQL already carries a
+ * per-function cost estimate for exactly this purpose: pg_proc.procost, which
+ * is 1.0 by default and is set for the comparators whose work is more expensive
+ * than the reference (uuid_cmp 2.40, btnamecmp 1.55, interval_cmp 1.20,
+ * numeric_cmp 1.15).  Rather than hardcoding a table of type OIDs here, derive
+ * the charge from the comparator the sort will actually call, so the relative
+ * costs can be expressed as data and adjusted without touching the planner.
+ *
+ * The comparator is scaled so that a procost of 1.0 reproduces today's flat
+ * charge exactly; a type measured at twice its reference needs procost 2.0.
+ * Returns 0.0 when the ordering operator cannot be identified.
+ */
+Cost
+sort_comparison_cost(PlannerInfo *root, List *pathkeys)
+{
+	Cost		extra = 0.0;
+	QualCost	cost;
+	ListCell   *lc;
+
+	foreach(lc, pathkeys)
+	{
+		PathKey    *pathkey = lfirst_node(PathKey, lc);
+		EquivalenceMember *em;
+		Node	   *expr;
+		Oid			typid;
+		Oid			cmpfunc = InvalidOid;
+		ListCell   *lc2;
+
+		/* A volatile key's cost is not the comparator's to estimate. */
+		if (pathkey->pk_eclass->ec_has_volatile)
+			continue;
+
+		em = (EquivalenceMember *) linitial(pathkey->pk_eclass->ec_members);
+		expr = (Node *) em->em_expr;
+		typid = exprType(expr);
+
+		/*
+		 * BTORDER_PROC is the btree support function that compares two values,
+		 * which is exactly the work a sort does per comparison.
+		 */
+		foreach(lc2, pathkey->pk_eclass->ec_opfamilies)
+		{
+			Oid			opfamily = lfirst_oid(lc2);
+
+			cmpfunc = get_opfamily_proc(opfamily, typid, typid, BTORDER_PROC);
+
+			/*
+			 * The opfamily of a polymorphic type records its comparator under
+			 * the polymorphic type, not under each of its members: an enum
+			 * column is compared by anyenum's enum_cmp().  Arrays and ranges
+			 * are left unmatched on purpose -- their cost depends on the
+			 * element or bound type, which one comparator cost cannot say.
+			 */
+			if (!OidIsValid(cmpfunc) && type_is_enum(typid))
+				cmpfunc = get_opfamily_proc(opfamily, ANYENUMOID, ANYENUMOID,
+										   BTORDER_PROC);
+			if (OidIsValid(cmpfunc))
+				break;
+		}
+
+		/* Not every type has a comparator in an opfamily of its own. */
+		if (!OidIsValid(cmpfunc))
+			continue;
+
+		/*
+		 * add_function_cost() reads pg_proc.procost and gives a prosupport
+		 * function the chance to do better, so a type can express its own
+		 * comparison cost without this file knowing anything about it.
+		 * procost is expressed in cpu_operator_cost units and the flat charge
+		 * is two of those units, so scaling by two keeps a procost of 1.0 a
+		 * no-op: a system whose comparators are all at the default is
+		 * unaffected.
+		 *
+		 * Pass the sort key expression, not NULL: a prosupport cost function
+		 * cannot estimate the cost of comparing text without seeing the
+		 * collation and typmod.  The same comparison costs 1.5x to 1.9x more
+		 * under ICU than under C, and the difference grows with the data, so
+		 * procost alone cannot express it.
+		 */
+		cost.startup = 0.0;
+		cost.per_tuple = 0.0;
+		add_function_cost(root, cmpfunc, expr, &cost);
+
+		/* Scale by what the collation provider costs to compare. */
+		extra += 2.0 * (cost.per_tuple *
+						sort_provider_cost_factor(exprCollation(expr)) -
+						cpu_operator_cost);
+	}
+
+	return extra;
+}
+
+/*
  * cost_sort
  *	  Determines and returns the cost of sorting a relation, including
  *	  the cost of reading the input data.
  *
  * NOTE: some callers currently pass NIL for pathkeys because they
- * can't conveniently supply the sort keys.  Since this routine doesn't
- * currently do anything with pathkeys anyway, that doesn't matter...
- * but if it ever does, it should react gracefully to lack of key data.
- * (Actually, the thing we'd most likely be interested in is just the number
- * of sort keys, which all callers *could* supply.)
+ * can't conveniently supply the sort keys.  They get the flat per-comparison
+ * charge, since there is no comparator to look up.
  */
 void
 cost_sort(Path *path, PlannerInfo *root,
@@ -2260,6 +2428,8 @@ cost_sort(Path *path, PlannerInfo *root,
 {
 	Cost		startup_cost;
 	Cost		run_cost;
+
+	comparison_cost += sort_comparison_cost(root, pathkeys);
 
 	cost_tuplesort(&startup_cost, &run_cost,
 				   tuples, width,
@@ -2566,7 +2736,7 @@ cost_append(AppendPath *apath, PlannerInfo *root)
  * The heap is never spilled to disk, since we assume N is not very large.
  * So this is much simpler than cost_sort.
  *
- * As in cost_sort, we charge two operator evals per tuple comparison.
+ * As in cost_sort, we charge the same per-comparison cost the sort does.
  *
  * 'pathkeys' is a list of sort keys
  * 'n_streams' is the number of input streams
@@ -2599,8 +2769,13 @@ cost_merge_append(Path *path, PlannerInfo *root,
 	N = (n_streams < 2) ? 2.0 : (double) n_streams;
 	logN = LOG2(N);
 
-	/* Assumed cost per tuple comparison */
-	comparison_cost = 2.0 * cpu_operator_cost;
+	/*
+	 * Assumed cost per tuple comparison.  The heap merge compares with the
+	 * same ordering comparators a sort uses, so it pays the same extra
+	 * per-comparison cost.
+	 */
+	comparison_cost = 2.0 * cpu_operator_cost +
+		sort_comparison_cost(root, pathkeys);
 
 	/* Heap creation cost */
 	startup_cost += comparison_cost * N * logN;

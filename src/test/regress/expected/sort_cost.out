@@ -1,0 +1,234 @@
+--
+-- Tests for the per-comparison charge of a sort.
+--
+-- The run-count correction in tuplesort_run_count() is not observable from SQL:
+-- it changes the number of merge passes only where the estimated in-memory
+-- footprint crosses a merge-order boundary, and the boundary depends on
+-- sizeof(SortTuple).  It is validated against the executor's trace_sort output
+-- instead.
+--
+-- The planner looks the sort comparator up through the sort key's btree
+-- opfamily and charges what pg_proc.procost says, scaled by the collation
+-- provider.  Both inputs are moved here, and the assertions are equalities or
+-- tolerance bands on the comparison component rather than absolute costs: the
+-- component is isolated by subtracting the scan the sort already charged for,
+-- and no exact cost is printed.
+--
+CREATE FUNCTION sort_plan_cost(query text) RETURNS numeric
+LANGUAGE plpgsql AS
+$$
+DECLARE
+    result json;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON) %s', query) INTO result;
+    RETURN (result -> 0 -> 'Plan' ->> 'Total Cost')::numeric;
+END
+$$;
+CREATE TYPE sort_cost_e AS ENUM ('a', 'b', 'c');
+CREATE TABLE sort_cost_t (t text, i int, n numeric, u uuid, b bytea, j jsonb,
+                          e sort_cost_e, a inet, m macaddr, bt bit(8));
+INSERT INTO sort_cost_t
+    SELECT 'value' || lpad(g::text, 6, '0'), g, g, md5(g::text)::uuid,
+           decode(md5(g::text), 'hex'), jsonb_build_object('k', g),
+           (ARRAY['a', 'b', 'c'])[g % 3 + 1]::sort_cost_e,
+           ('10.0.0.' || (g % 250))::inet,
+           ('02:00:00:00:00:' || lpad(to_hex(g % 256), 2, '0'))::macaddr,
+           (g % 256)::bit(8)
+      FROM generate_series(1, 2000) g;
+ANALYZE sort_cost_t;
+-- The scan alone, so that the comparison component can be isolated from the
+-- rest of the plan.
+CREATE TEMP TABLE sort_cost_base AS
+SELECT sort_plan_cost('SELECT * FROM sort_cost_t') AS scan,
+       sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "C"') AS sorted;
+-- procost is what the planner reads.  At its default of 1.0 the charge is
+-- exactly the same as before this mechanism existed.
+SELECT sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "C"') = sorted
+           AS procost_1_is_noop
+  FROM sort_cost_base;
+ procost_1_is_noop 
+-------------------
+ t
+(1 row)
+
+-- Raising it raises the comparison component by about the same factor.  The
+-- bands, not exact values, because the component also contains the per-tuple
+-- output charge, whose share is a property of the plan and not of this
+-- mechanism.
+ALTER FUNCTION bttextcmp(text, text) COST 2;
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "C"') - scan)
+           BETWEEN 1.9 * (sorted - scan) AND 2.1 * (sorted - scan)
+           AS procost_2_doubles_component
+  FROM sort_cost_base;
+ procost_2_doubles_component 
+-----------------------------
+ t
+(1 row)
+
+ALTER FUNCTION bttextcmp(text, text) COST 4;
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "C"') - scan)
+           BETWEEN 3.7 * (sorted - scan) AND 4.0 * (sorted - scan)
+           AS procost_4_quadruples_component
+  FROM sort_cost_base;
+ procost_4_quadruples_component 
+--------------------------------
+ t
+(1 row)
+
+ALTER FUNCTION bttextcmp(text, text) COST 1;
+SELECT sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "C"') = sorted
+           AS procost_back_to_1_restores
+  FROM sort_cost_base;
+ procost_back_to_1_restores 
+----------------------------
+ t
+(1 row)
+
+-- POSIX is an alias of C, and both are recognized as the C locale: the charge
+-- is the same.  Comparing against C_COLLATION_OID would miss the alias.
+SELECT sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "POSIX"') = sorted
+           AS posix_is_c
+  FROM sort_cost_base;
+ posix_is_c 
+------------
+ t
+(1 row)
+
+-- The builtin provider compares code points and is charged slightly more than
+-- C; ICU goes through the collation levels and is charged much more.
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE ucs_basic') - scan)
+           BETWEEN 1.03 * (sorted - scan) AND 1.07 * (sorted - scan)
+           AS builtin_provider_costs_more
+  FROM sort_cost_base;
+ builtin_provider_costs_more 
+-----------------------------
+ t
+(1 row)
+
+SELECT EXISTS (SELECT 1 FROM pg_collation
+               WHERE collname = 'en-x-icu' AND collprovider = 'i') AS have_icu
+\gset
+\if :have_icu
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY t COLLATE "en-x-icu"') - scan)
+           BETWEEN 2.2 * (sorted - scan) AND 2.5 * (sorted - scan)
+           AS icu_costs_much_more
+  FROM sort_cost_base;
+ icu_costs_much_more 
+---------------------
+ t
+(1 row)
+
+\endif
+-- The catalog gives the comparators whose cost is well above int4 a procost
+-- of their own (numeric_cmp 1.15, interval_cmp 1.20, btnamecmp 1.55,
+-- uuid_cmp 2.40; see src/tools/measure_sort_cost.sql for the measurements), and
+-- a sort of that type is charged accordingly.
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY u') - scan)
+           BETWEEN 2.3 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+               AND 2.5 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+           AS uuid_comparator_cost
+  FROM sort_cost_base;
+ uuid_comparator_cost 
+----------------------
+ t
+(1 row)
+
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY n') - scan)
+           BETWEEN 1.10 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+               AND 1.20 * (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan)
+           AS numeric_comparator_cost
+  FROM sort_cost_base;
+ numeric_comparator_cost 
+-------------------------
+ t
+(1 row)
+
+-- The rest of the comparators the catalog gives a cost of their own.  The
+-- expected ratios are the procost scaled by the share of the comparison
+-- component, which is what the assertions above do for uuid and numeric.
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY e') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 1.42 AND 1.52 AS enum_cmp_cost
+  FROM sort_cost_base;
+ enum_cmp_cost 
+---------------
+ t
+(1 row)
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY a') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 1.56 AND 1.68 AS network_cmp_cost
+  FROM sort_cost_base;
+ network_cmp_cost 
+------------------
+ t
+(1 row)
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY m') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 1.85 AND 1.97 AS macaddr_cmp_cost
+  FROM sort_cost_base;
+ macaddr_cmp_cost 
+------------------
+ t
+(1 row)
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY b') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 2.00 AND 2.12 AS byteacmp_cost
+  FROM sort_cost_base;
+ byteacmp_cost 
+---------------
+ t
+(1 row)
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY bt') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 2.00 AND 2.12 AS bitcmp_cost
+  FROM sort_cost_base;
+ bitcmp_cost 
+-------------
+ t
+(1 row)
+
+SELECT round((sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY j') - scan)
+             / (sort_plan_cost('SELECT * FROM sort_cost_t ORDER BY i') - scan), 2)
+           BETWEEN 2.63 AND 2.75 AS jsonb_cmp_cost
+  FROM sort_cost_base;
+ jsonb_cmp_cost 
+----------------
+ t
+(1 row)
+
+-- MergeAppend merges with the same comparators a sort uses, and was charged
+-- the flat amount before this change.
+CREATE TABLE sort_cost_p (t text) PARTITION BY RANGE (t);
+CREATE TABLE sort_cost_p1 PARTITION OF sort_cost_p FOR VALUES FROM ('a') TO ('m');
+CREATE TABLE sort_cost_p2 PARTITION OF sort_cost_p FOR VALUES FROM ('m') TO ('z');
+INSERT INTO sort_cost_p
+    SELECT 'a' || lpad(g::text, 6, '0') FROM generate_series(1, 500) g
+    UNION ALL
+    SELECT 'v' || lpad(g::text, 6, '0') FROM generate_series(1, 500) g;
+CREATE INDEX ON sort_cost_p1 (t);
+CREATE INDEX ON sort_cost_p2 (t);
+ANALYZE sort_cost_p;
+SET enable_seqscan = off;
+CREATE TEMP TABLE sort_cost_merge AS
+SELECT sort_plan_cost('SELECT * FROM sort_cost_p') AS append,
+       sort_plan_cost('SELECT * FROM sort_cost_p ORDER BY t COLLATE "C"') AS merged;
+ALTER FUNCTION bttextcmp(text, text) COST 4;
+SELECT (sort_plan_cost('SELECT * FROM sort_cost_p ORDER BY t COLLATE "C"') - append)
+           BETWEEN 3.0 * (merged - append) AND 4.2 * (merged - append)
+           AS merge_append_uses_comparator_cost
+  FROM sort_cost_merge;
+ merge_append_uses_comparator_cost 
+-----------------------------------
+ t
+(1 row)
+
+ALTER FUNCTION bttextcmp(text, text) COST 1;
+RESET enable_seqscan;
+DROP TABLE sort_cost_p;
+DROP TABLE sort_cost_t;
+DROP TYPE sort_cost_e;
+DROP FUNCTION sort_plan_cost(text);
