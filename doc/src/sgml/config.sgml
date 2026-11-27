@@ -6104,6 +6104,25 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-enable-subplan-cache" xreflabel="enable_subplan_cache">
+      <term><varname>enable_subplan_cache</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>enable_subplan_cache</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables or disables caching of the results of correlated subplans.
+        A correlated scalar or <literal>EXISTS</literal> subplan is normally
+        re-executed once per outer row, even when it is evaluated for only a
+        handful of distinct parameter values; with this setting the result is
+        remembered for each parameter value, within a small memory budget and
+        with least-recently-used eviction.  Subplans containing volatile
+        functions are never cached.  The default is <literal>on</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-enable-memoize" xreflabel="enable_memoize">
       <term><varname>enable_memoize</varname> (<type>boolean</type>)
       <indexterm>
