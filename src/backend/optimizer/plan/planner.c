@@ -1985,15 +1985,31 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 					top = rel;
 			}
 
-			if (top != NULL && plan_race_pick < list_length(top->pathlist))
+			if (top != NULL)
 			{
-				Path	   *picked = (Path *) list_nth(top->pathlist,
-													  plan_race_pick);
+				/*
+				 * Candidates are the paths the join search kept.  Paths it
+				 * pruned cannot be injected here: keeping them alive needs a
+				 * collection context that survives add_path(), and using them
+				 * as the top path is unsafe (they may not produce the rel's
+				 * output).
+				 */
+				List	   *cands = top->pathlist;
 
-				top->cheapest_total_path = picked;
-				elog(LOG, "plan_race: candidate %d of %d (ptype %d, cost %.0f)",
-					 plan_race_pick, list_length(top->pathlist),
-					 (int) picked->pathtype, picked->total_cost);
+				ereport(NOTICE,
+						(errmsg("plan_race: %d candidates at top join rel",
+								list_length(cands))));
+
+				if (plan_race_pick < list_length(cands))
+				{
+					Path	   *picked = (Path *) list_nth(cands,
+														  plan_race_pick);
+
+					top->cheapest_total_path = picked;
+					elog(LOG, "plan_race: candidate %d of %d (ptype %d, cost %.0f)",
+						 plan_race_pick, list_length(cands),
+						 (int) picked->pathtype, picked->total_cost);
+				}
 			}
 		}
 
