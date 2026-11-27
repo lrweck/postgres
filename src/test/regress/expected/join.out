@@ -7858,14 +7858,15 @@ explain (costs off)
 
 explain (costs off)
   select * from tenk1 a full join tenk1 b using(unique2) where unique2 = 42;
-                   QUERY PLAN                    
--------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Merge Full Join
+   Filter: ((a.unique2 = 42) OR ((a.unique2 IS NULL) AND (b.unique2 = 42)))
    ->  Index Scan using tenk1_unique2 on tenk1 a
          Index Cond: (unique2 = 42)
    ->  Index Scan using tenk1_unique2 on tenk1 b
          Index Cond: (unique2 = 42)
-(5 rows)
+(6 rows)
 
 --
 -- test that quals attached to an outer join have correct semantics,

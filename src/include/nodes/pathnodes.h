@@ -610,6 +610,7 @@ struct PlannerInfo
 	AttrNumber *grouping_map pg_node_attr(read_write_ignore);
 	/* List of MinMaxAggInfos */
 	List	   *minmax_aggs;
+	List	   *derived_quals;	/* quals implied by functional quals */
 
 	/* context holding PlannerInfo */
 	MemoryContext planner_cxt pg_node_attr(read_write_ignore);

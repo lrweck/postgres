@@ -899,6 +899,13 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_functional_quals', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables deriving indexable predicates from functional quals.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_functional_quals',
+  boot_val => 'true',
+},
+
 { name => 'enable_gathermerge', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of gather merge plans.',
   flags => 'GUC_EXPLAIN',

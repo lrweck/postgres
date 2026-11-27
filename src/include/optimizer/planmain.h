@@ -21,6 +21,7 @@
 #define DEFAULT_CURSOR_TUPLE_FRACTION 0.1
 extern PGDLLIMPORT double cursor_tuple_fraction;
 extern PGDLLIMPORT bool enable_self_join_elimination;
+extern PGDLLIMPORT bool enable_functional_quals;
 
 /* query_planner callback to compute query_pathkeys */
 typedef void (*query_pathkeys_callback) (PlannerInfo *root, void *extra);
@@ -35,6 +36,11 @@ extern RelOptInfo *query_planner(PlannerInfo *root,
  * prototypes for plan/planagg.c
  */
 extern void preprocess_minmax_aggregates(PlannerInfo *root);
+
+/*
+ * prototypes for plan/derive_quals.c
+ */
+extern Node *derive_functional_quals(PlannerInfo *root, Node *quals);
 
 /*
  * prototypes for plan/createplan.c

@@ -15,6 +15,7 @@ include $(top_builddir)/src/Makefile.global
 OBJS = \
 	analyzejoins.o \
 	createplan.o \
+	derive_quals.o \
 	initsplan.o \
 	planagg.o \
 	planmain.o \

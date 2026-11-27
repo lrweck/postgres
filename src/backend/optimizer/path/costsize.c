@@ -5592,6 +5592,33 @@ approx_tuple_count(PlannerInfo *root, JoinPath *path, List *quals)
 
 
 /*
+ * filter_derived_clauses
+ *		Return 'clauses' without predicates derived from functional quals.
+ *
+ * Derived predicates are implied by the original quals; the planner must not
+ * count both when estimating result size.  They stay in baserestrictinfo so
+ * that index paths can use them for access.
+ */
+static List *
+filter_derived_clauses(PlannerInfo *root, List *clauses)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	if (root->derived_quals == NIL)
+		return clauses;
+
+	foreach(lc, clauses)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (!list_member(root->derived_quals, rinfo->clause))
+			result = lappend(result, rinfo);
+	}
+	return result;
+}
+
+/*
  * set_baserel_size_estimates
  *		Set the size estimates for the given base relation.
  *
@@ -5608,13 +5635,23 @@ void
 set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 {
 	double		nrows;
+	List	   *sel_clauses = rel->baserestrictinfo;
 
 	/* Should only be applied to base relations */
 	Assert(rel->relid > 0);
 
+	/*
+	 * Predicates derived from functional quals are implied by the original
+	 * quals.  Counting both in the selectivity product would estimate the
+	 * same restriction twice and can badly underestimate the result, so leave
+	 * the derived ones out of the base row count (they are still available to
+	 * the index path code, which needs their selectivity for costing).
+	 */
+	sel_clauses = filter_derived_clauses(root, rel->baserestrictinfo);
+
 	nrows = rel->tuples *
 		clauselist_selectivity(root,
-							   rel->baserestrictinfo,
+							   sel_clauses,
 							   0,
 							   JOIN_INNER,
 							   NULL);
@@ -5647,7 +5684,9 @@ get_parameterized_baserel_size(PlannerInfo *root, RelOptInfo *rel,
 	 * restriction clauses.  Note that we force the clauses to be treated as
 	 * non-join clauses during selectivity estimation.
 	 */
-	allclauses = list_concat_copy(param_clauses, rel->baserestrictinfo);
+	allclauses = list_concat_copy(param_clauses,
+								  filter_derived_clauses(root,
+														 rel->baserestrictinfo));
 	nrows = rel->tuples *
 		clauselist_selectivity(root,
 							   allclauses,

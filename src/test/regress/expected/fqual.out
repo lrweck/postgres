@@ -1,0 +1,378 @@
+--
+-- Functional qual pushdown
+--
+SET enable_seqscan = off;
+CREATE TABLE fq (i int, n numeric, f float8, s text, t timestamp);
+INSERT INTO fq
+  SELECT g, (g % 100) + 0.5, (g % 100) + 0.5, 's' || (g % 100),
+         timestamp '2012-01-01' + g * interval '5 minutes'
+  FROM generate_series(1, 100000) g;
+CREATE INDEX fq_i ON fq (i);
+CREATE INDEX fq_n ON fq (n);
+CREATE INDEX fq_f ON fq (f);
+CREATE INDEX fq_s ON fq (s);
+CREATE INDEX fq_t ON fq (t);
+VACUUM ANALYZE fq;
+-- CASE: the branch whose value is c is the only one that can produce it
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE CASE WHEN i = 42 THEN 1 ELSE 0 END = 1;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = 42)
+         Filter: (CASE WHEN (i = 42) THEN 1 ELSE 0 END = 1)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq
+   WHERE CASE WHEN i = 42 THEN 1 WHEN i = 43 THEN 2 ELSE 0 END = 2;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = 43)
+         Filter: (CASE WHEN (i = 42) THEN 1 WHEN (i = 43) THEN 2 ELSE 0 END = 2)
+(4 rows)
+
+-- ELSE matching is the complement, not an indexable predicate
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE CASE WHEN i = 42 THEN 1 ELSE 2 END = 2;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Filter: (CASE WHEN (i = 42) THEN 1 ELSE 2 END = 2)
+(3 rows)
+
+-- COALESCE / NULLIF
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE COALESCE(s, 'x') = 's42';
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_s on fq
+         Index Cond: (s = 's42'::text)
+         Filter: (COALESCE(s, 'x'::text) = 's42'::text)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE COALESCE(s, 's42') = 's42';
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on fq
+         Recheck Cond: ((s = 's42'::text) OR (s IS NULL))
+         Filter: (COALESCE(s, 's42'::text) = 's42'::text)
+         ->  BitmapOr
+               ->  Bitmap Index Scan on fq_s
+                     Index Cond: (s = 's42'::text)
+               ->  Bitmap Index Scan on fq_s
+                     Index Cond: (s IS NULL)
+(9 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE NULLIF(s, 'zzz') = 's42';
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_s on fq
+         Index Cond: (s = 's42'::text)
+         Filter: (NULLIF(s, 'zzz'::text) = 's42'::text)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE NULLIF(s, 's42') = 's42';
+           QUERY PLAN           
+--------------------------------
+ Aggregate
+   ->  Result
+         Replaces: Scan on fq
+         One-Time Filter: false
+(4 rows)
+
+-- date/time
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE date(t) = '2012-01-02';
+                                                                       QUERY PLAN                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_t on fq
+         Index Cond: ((t >= 'Mon Jan 02 00:00:00 2012'::timestamp without time zone) AND (t < 'Tue Jan 03 00:00:00 2012'::timestamp without time zone))
+         Filter: (date(t) = '01-02-2012'::date)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE date_trunc('day', t) = '2012-01-02';
+                                                                       QUERY PLAN                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_t on fq
+         Index Cond: ((t >= 'Mon Jan 02 00:00:00 2012'::timestamp without time zone) AND (t < 'Tue Jan 03 00:00:00 2012'::timestamp without time zone))
+         Filter: (date_trunc('day'::text, t) = 'Mon Jan 02 00:00:00 2012'::timestamp without time zone)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE date_trunc('month', t) = '2012-01-01';
+                                                                       QUERY PLAN                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_t on fq
+         Index Cond: ((t >= 'Sun Jan 01 00:00:00 2012'::timestamp without time zone) AND (t < 'Wed Feb 01 00:00:00 2012'::timestamp without time zone))
+         Filter: (date_trunc('month'::text, t) = 'Sun Jan 01 00:00:00 2012'::timestamp without time zone)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE extract(year FROM t) = 2012;
+                                                                       QUERY PLAN                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_t on fq
+         Index Cond: ((t >= 'Sun Jan 01 00:00:00 2012'::timestamp without time zone) AND (t < 'Tue Jan 01 00:00:00 2013'::timestamp without time zone))
+         Filter: (EXTRACT(year FROM t) = '2012'::numeric)
+(4 rows)
+
+-- abs / sign / floor / ceil / trunc
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE abs(i) = 42;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = ANY ('{42,-42}'::integer[]))
+         Filter: (abs(i) = 42)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE sign(n) = 1;
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_n on fq
+         Index Cond: (n > '0'::numeric)
+         Filter: (sign(n) = '1'::numeric)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE floor(n) = 3;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_n on fq
+         Index Cond: ((n >= '3'::numeric) AND (n < '4'::numeric))
+         Filter: (floor(n) = '3'::numeric)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE ceil(n) = 3;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_n on fq
+         Index Cond: ((n > '2'::numeric) AND (n <= '3'::numeric))
+         Filter: (ceil(n) = '3'::numeric)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE trunc(n) = 3;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_n on fq
+         Index Cond: ((n >= '3'::numeric) AND (n < '4'::numeric))
+         Filter: (trunc(n, 0) = '3'::numeric)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE floor(f) = 3;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_f on fq
+         Index Cond: ((f >= '3'::double precision) AND (f < '4'::double precision))
+         Filter: (floor(f) = '3'::double precision)
+(4 rows)
+
+-- arithmetic
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE i + 5 = 42;
+               QUERY PLAN               
+----------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = 37)
+         Filter: ((i + 5) = 42)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE 5 - i = 42;
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = '-37'::integer)
+         Filter: ((5 - i) = 42)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE i * 3 = 42;
+               QUERY PLAN               
+----------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = 14)
+         Filter: ((i * 3) = 42)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE -i = -42;
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_i on fq
+         Index Cond: (i = 42)
+         Filter: ((- i) = '-42'::integer)
+(4 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE n + 0.5 = 3.0;
+               QUERY PLAN               
+----------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_n on fq
+         Index Cond: (n = 2.5)
+         Filter: ((n + 0.5) = 3.0)
+(4 rows)
+
+-- not derivable: opaque functions
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE lower(s) = 's42';
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_s on fq
+         Filter: (lower(s) = 's42'::text)
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE upper(s) = 'S42';
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_s on fq
+         Filter: (upper(s) = 'S42'::text)
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE length(s) = 3;
+               QUERY PLAN               
+----------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_s on fq
+         Filter: (length(s) = 3)
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+  SELECT count(*) FROM fq WHERE md5(s) = md5('s42');
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Aggregate
+   ->  Index Only Scan using fq_s on fq
+         Filter: (md5(s) = '18bbcb6a0c4cf10d6d3261dec664c3b2'::text)
+(3 rows)
+
+-- results: same with the derivation off
+SET enable_seqscan = on;
+SELECT 'case' AS q, count(*) FROM fq
+ WHERE CASE WHEN i = 42 THEN 1 ELSE 0 END = 1
+UNION ALL
+SELECT 'coalesce', count(*) FROM fq WHERE COALESCE(s, 's42') = 's42'
+UNION ALL
+SELECT 'nullif', count(*) FROM fq WHERE NULLIF(s, 's42') = 's42'
+UNION ALL
+SELECT 'date', count(*) FROM fq WHERE date(t) = '2012-01-02'
+UNION ALL
+SELECT 'date_trunc', count(*) FROM fq WHERE date_trunc('month', t) = '2012-01-01'
+UNION ALL
+SELECT 'extract', count(*) FROM fq WHERE extract(year FROM t) = 2012
+UNION ALL
+SELECT 'abs', count(*) FROM fq WHERE abs(i) = 42
+UNION ALL
+SELECT 'floor', count(*) FROM fq WHERE floor(n) = 3
+UNION ALL
+SELECT 'arith_add', count(*) FROM fq WHERE i + 5 = 42
+UNION ALL
+SELECT 'arith_mul', count(*) FROM fq WHERE i * 3 = 42
+UNION ALL
+SELECT 'arith_neg', count(*) FROM fq WHERE -i = -42
+ORDER BY 1;
+     q      | count  
+------------+--------
+ abs        |      1
+ arith_add  |      1
+ arith_mul  |      1
+ arith_neg  |      1
+ case       |      1
+ coalesce   |   1000
+ date       |    288
+ date_trunc |   8927
+ extract    | 100000
+ floor      |   1000
+ nullif     |      0
+(11 rows)
+
+SET enable_functional_quals = off;
+SELECT 'case' AS q, count(*) FROM fq
+ WHERE CASE WHEN i = 42 THEN 1 ELSE 0 END = 1
+UNION ALL
+SELECT 'coalesce', count(*) FROM fq WHERE COALESCE(s, 's42') = 's42'
+UNION ALL
+SELECT 'nullif', count(*) FROM fq WHERE NULLIF(s, 's42') = 's42'
+UNION ALL
+SELECT 'date', count(*) FROM fq WHERE date(t) = '2012-01-02'
+UNION ALL
+SELECT 'date_trunc', count(*) FROM fq WHERE date_trunc('month', t) = '2012-01-01'
+UNION ALL
+SELECT 'extract', count(*) FROM fq WHERE extract(year FROM t) = 2012
+UNION ALL
+SELECT 'abs', count(*) FROM fq WHERE abs(i) = 42
+UNION ALL
+SELECT 'floor', count(*) FROM fq WHERE floor(n) = 3
+UNION ALL
+SELECT 'arith_add', count(*) FROM fq WHERE i + 5 = 42
+UNION ALL
+SELECT 'arith_mul', count(*) FROM fq WHERE i * 3 = 42
+UNION ALL
+SELECT 'arith_neg', count(*) FROM fq WHERE -i = -42
+ORDER BY 1;
+     q      | count  
+------------+--------
+ abs        |      1
+ arith_add  |      1
+ arith_mul  |      1
+ arith_neg  |      1
+ case       |      1
+ coalesce   |   1000
+ date       |    288
+ date_trunc |   8927
+ extract    | 100000
+ floor      |   1000
+ nullif     |      0
+(11 rows)
+
+-- a column with no index gets no derived predicate (no extra filter)
+CREATE TABLE fq_noidx (i int);
+INSERT INTO fq_noidx SELECT g FROM generate_series(1, 1000) g;
+VACUUM ANALYZE fq_noidx;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM fq_noidx WHERE abs(i) = 1;
+          QUERY PLAN          
+------------------------------
+ Aggregate
+   ->  Seq Scan on fq_noidx
+         Filter: (abs(i) = 1)
+(3 rows)
+
+DROP TABLE fq_noidx;
+RESET enable_functional_quals;
+RESET enable_seqscan;
+DROP TABLE fq;

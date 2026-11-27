@@ -1123,6 +1123,30 @@ create_index_path(PlannerInfo *root,
 	cost_index(pathnode, root, loop_count, partial_path);
 
 	/*
+	 * If this index path is made possible by a qual derived from a functional
+	 * qual, the derived qual is implied by the original ones and must not
+	 * change the estimated result size.  cost_index() sizes the path from the
+	 * index selectivity, which includes the derived qual; restore the
+	 * relation's original (pre-derivation) estimate.  The index selectivity
+	 * is still used for the I/O cost, which is the point of the derivation.
+	 */
+	if (!partial_path && root->derived_quals != NIL && indexclauses != NIL)
+	{
+		ListCell   *lc;
+
+		foreach(lc, indexclauses)
+		{
+			IndexClause *iclause = lfirst_node(IndexClause, lc);
+
+			if (list_member(root->derived_quals, iclause->rinfo->clause))
+			{
+				pathnode->path.rows = rel->rows;
+				break;
+			}
+		}
+	}
+
+	/*
 	 * cost_index will set disabled_nodes to 1 if this rel is not allowed to
 	 * use index scans in general, but it doesn't have the IndexOptInfo to
 	 * know whether this specific index has been disabled.

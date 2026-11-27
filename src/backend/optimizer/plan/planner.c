@@ -828,6 +828,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 	root->update_colnos = NIL;
 	root->grouping_map = NULL;
 	root->minmax_aggs = NIL;
+	root->derived_quals = NIL;
 	root->qual_security_level = 0;
 	root->hasPseudoConstantQuals = false;
 	root->hasAlternativeSubPlans = false;
@@ -1033,6 +1034,16 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 							  EXPRKIND_TARGET);
 
 	preprocess_qual_conditions(root, (Node *) parse->jointree);
+
+	/*
+	 * Add indexable predicates implied by functional equality quals, e.g.
+	 * date(created_at) = '...' -> created_at >= '...' AND created_at < '...'.
+	 * This runs before deconstruct_jointree() so the derived predicates become
+	 * ordinary baserestrictinfos; the original quals are kept.
+	 */
+	if (enable_functional_quals && parse->jointree != NULL)
+		parse->jointree->quals =
+			derive_functional_quals(root, parse->jointree->quals);
 
 	parse->havingQual = preprocess_expression(root, parse->havingQual,
 											  EXPRKIND_QUAL);

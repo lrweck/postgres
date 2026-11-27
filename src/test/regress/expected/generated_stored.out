@@ -832,7 +832,8 @@ EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
 ------------------------------------------------
  Index Scan using gtest22c_expr_idx on gtest22c
    Index Cond: ((b * 3) = 6)
-(2 rows)
+   Filter: (b = 2)
+(3 rows)
 
 SELECT * FROM gtest22c WHERE b * 3 = 6;
  a | b 
@@ -873,7 +874,8 @@ EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 12;
 ------------------------------------------------
  Index Scan using gtest22c_expr_idx on gtest22c
    Index Cond: ((b * 3) = 12)
-(2 rows)
+   Filter: (b = 4)
+(3 rows)
 
 SELECT * FROM gtest22c WHERE b * 3 = 12;
  a | b 
