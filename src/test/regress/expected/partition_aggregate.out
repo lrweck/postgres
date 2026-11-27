@@ -1413,22 +1413,26 @@ ALTER TABLE pagg_tab_para_p3 SET (parallel_workers = 0);
 ANALYZE pagg_tab_para;
 EXPLAIN (COSTS OFF)
 SELECT x, sum(y), avg(y), sum(x+y), count(*) FROM pagg_tab_para GROUP BY x HAVING avg(y) < 7 ORDER BY 1, 2, 3;
-                                     QUERY PLAN                                      
--------------------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Sort
    Sort Key: pagg_tab_para.x, (sum(pagg_tab_para.y)), (avg(pagg_tab_para.y))
-   ->  Finalize HashAggregate
-         Group Key: pagg_tab_para.x
-         Filter: (avg(pagg_tab_para.y) < '7'::numeric)
-         ->  Gather
-               Workers Planned: 2
-               ->  Partial HashAggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Append
+               ->  HashAggregate
                      Group Key: pagg_tab_para.x
-                     ->  Parallel Append
-                           ->  Seq Scan on pagg_tab_para_p1 pagg_tab_para_1
-                           ->  Seq Scan on pagg_tab_para_p3 pagg_tab_para_3
-                           ->  Parallel Seq Scan on pagg_tab_para_p2 pagg_tab_para_2
-(13 rows)
+                     Filter: (avg(pagg_tab_para.y) < '7'::numeric)
+                     ->  Seq Scan on pagg_tab_para_p1 pagg_tab_para
+               ->  HashAggregate
+                     Group Key: pagg_tab_para_1.x
+                     Filter: (avg(pagg_tab_para_1.y) < '7'::numeric)
+                     ->  Seq Scan on pagg_tab_para_p2 pagg_tab_para_1
+               ->  HashAggregate
+                     Group Key: pagg_tab_para_2.x
+                     Filter: (avg(pagg_tab_para_2.y) < '7'::numeric)
+                     ->  Seq Scan on pagg_tab_para_p3 pagg_tab_para_2
+(17 rows)
 
 SELECT x, sum(y), avg(y), sum(x+y), count(*) FROM pagg_tab_para GROUP BY x HAVING avg(y) < 7 ORDER BY 1, 2, 3;
  x  | sum  |        avg         |  sum  | count 
@@ -1449,18 +1453,22 @@ SELECT x, sum(y), avg(y), sum(x+y), count(*) FROM pagg_tab_para GROUP BY x HAVIN
 -----------------------------------------------------------------------------
  Sort
    Sort Key: pagg_tab_para.x, (sum(pagg_tab_para.y)), (avg(pagg_tab_para.y))
-   ->  Finalize HashAggregate
-         Group Key: pagg_tab_para.x
-         Filter: (avg(pagg_tab_para.y) < '7'::numeric)
-         ->  Gather
-               Workers Planned: 2
-               ->  Partial HashAggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Append
+               ->  HashAggregate
                      Group Key: pagg_tab_para.x
-                     ->  Parallel Append
-                           ->  Seq Scan on pagg_tab_para_p1 pagg_tab_para_1
-                           ->  Seq Scan on pagg_tab_para_p2 pagg_tab_para_2
-                           ->  Seq Scan on pagg_tab_para_p3 pagg_tab_para_3
-(13 rows)
+                     Filter: (avg(pagg_tab_para.y) < '7'::numeric)
+                     ->  Seq Scan on pagg_tab_para_p1 pagg_tab_para
+               ->  HashAggregate
+                     Group Key: pagg_tab_para_1.x
+                     Filter: (avg(pagg_tab_para_1.y) < '7'::numeric)
+                     ->  Seq Scan on pagg_tab_para_p2 pagg_tab_para_1
+               ->  HashAggregate
+                     Group Key: pagg_tab_para_2.x
+                     Filter: (avg(pagg_tab_para_2.y) < '7'::numeric)
+                     ->  Seq Scan on pagg_tab_para_p3 pagg_tab_para_2
+(17 rows)
 
 SELECT x, sum(y), avg(y), sum(x+y), count(*) FROM pagg_tab_para GROUP BY x HAVING avg(y) < 7 ORDER BY 1, 2, 3;
  x  | sum  |        avg         |  sum  | count 

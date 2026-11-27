@@ -5391,7 +5391,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	/*
 	 * For each operator or function node in the given tree, we charge the
 	 * estimated execution cost given by pg_proc.procost (remember to multiply
-	 * this by cpu_operator_cost).
+	 * this by COST_OP_QUAL: this is expression evaluation, not bulk work).
 	 *
 	 * Vars and Consts are charged zero, and so are boolean operators (AND,
 	 * OR, NOT). Simplistic, but a lot better than no model at all.
@@ -5412,7 +5412,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	 */
 	if (IsA(node, FuncExpr))
 	{
-		add_function_cost(context->root, ((FuncExpr *) node)->funcid, node,
+		add_expr_cost(context->root, ((FuncExpr *) node)->funcid, node,
 						  &context->total);
 	}
 	else if (IsA(node, OpExpr) ||
@@ -5421,7 +5421,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	{
 		/* rely on struct equivalence to treat these all alike */
 		set_opfuncid((OpExpr *) node);
-		add_function_cost(context->root, ((OpExpr *) node)->opfuncid, node,
+		add_expr_cost(context->root, ((OpExpr *) node)->opfuncid, node,
 						  &context->total);
 	}
 	else if (IsA(node, ScalarArrayOpExpr))
@@ -5434,7 +5434,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 
 		set_sa_opfuncid(saop);
 		sacosts.startup = sacosts.per_tuple = 0;
-		add_function_cost(context->root, saop->opfuncid, NULL,
+		add_expr_cost(context->root, saop->opfuncid, NULL,
 						  &sacosts);
 
 		if (OidIsValid(saop->hashfuncid))
@@ -5442,7 +5442,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 			/* Handle costs for hashed ScalarArrayOpExpr */
 			hcosts.startup = hcosts.per_tuple = 0;
 
-			add_function_cost(context->root, saop->hashfuncid, NULL, &hcosts);
+			add_expr_cost(context->root, saop->hashfuncid, NULL, &hcosts);
 			context->total.startup += sacosts.startup + hcosts.startup;
 
 			/* Estimate the cost of building the hashtable. */
@@ -5488,7 +5488,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	else if (IsA(node, GroupingFunc))
 	{
 		/* Treat this as having cost 1 */
-		context->total.per_tuple += cpu_operator_cost;
+		context->total.per_tuple += COST_OP_QUAL;
 		return false;			/* don't recurse into children */
 	}
 	else if (IsA(node, CoerceViaIO))
@@ -5501,12 +5501,12 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 		/* check the result type's input function */
 		getTypeInputInfo(iocoerce->resulttype,
 						 &iofunc, &typioparam);
-		add_function_cost(context->root, iofunc, NULL,
+		add_expr_cost(context->root, iofunc, NULL,
 						  &context->total);
 		/* check the input type's output function */
 		getTypeOutputInfo(exprType((Node *) iocoerce->arg),
 						  &iofunc, &typisvarlena);
-		add_function_cost(context->root, iofunc, NULL,
+		add_expr_cost(context->root, iofunc, NULL,
 						  &context->total);
 	}
 	else if (IsA(node, ArrayCoerceExpr))
@@ -5531,7 +5531,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 		{
 			Oid			opid = lfirst_oid(lc);
 
-			add_function_cost(context->root, get_opcode(opid), NULL,
+			add_expr_cost(context->root, get_opcode(opid), NULL,
 							  &context->total);
 		}
 	}
@@ -5543,7 +5543,7 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 			 IsA(node, JsonExpr))
 	{
 		/* Treat all these as having cost 1 */
-		context->total.per_tuple += cpu_operator_cost;
+		context->total.per_tuple += COST_OP_QUAL;
 	}
 	else if (IsA(node, SubLink))
 	{

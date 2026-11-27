@@ -1909,8 +1909,8 @@ select * from tenk1 a, tenk1 b
 where exists(select * from tenk1 c
              where b.twothousand = c.twothousand and b.fivethous <> c.fivethous)
       and a.tenthous = b.tenthous and a.tenthous < 5000;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Hash Right Semi Join
    Hash Cond: (c.twothousand = b.twothousand)
    Join Filter: (b.fivethous <> c.fivethous)
@@ -1920,11 +1920,9 @@ where exists(select * from tenk1 c
                Hash Cond: (b.tenthous = a.tenthous)
                ->  Seq Scan on tenk1 b
                ->  Hash
-                     ->  Bitmap Heap Scan on tenk1 a
-                           Recheck Cond: (tenthous < 5000)
-                           ->  Bitmap Index Scan on tenk1_thous_tenthous
-                                 Index Cond: (tenthous < 5000)
-(13 rows)
+                     ->  Seq Scan on tenk1 a
+                           Filter: (tenthous < 5000)
+(11 rows)
 
 --
 -- More complicated constructs
@@ -2144,8 +2142,8 @@ select * from x left join y on (x1 = y1 and y2 is not null);
   1 | 11 |  1 | 111
   2 | 22 |  2 | 222
   3 |    |  3 | 333
-  5 |    |    |    
   4 | 44 |    |    
+  5 |    |    |    
 (5 rows)
 
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
@@ -2187,9 +2185,9 @@ on (x1 = xx1 and xx2 is not null);
 ----+----+----+-----+-----+-----
   1 | 11 |  1 | 111 |   1 |  11
   2 | 22 |  2 | 222 |   2 |  22
+  3 |    |  3 | 333 |     |    
   4 | 44 |  4 |     |   4 |  44
   5 |    |    |     |     |    
-  3 |    |  3 | 333 |     |    
 (5 rows)
 
 -- these should NOT give the same answers as above
@@ -2735,20 +2733,17 @@ select * from onek t1
     left join lateral
       (select * from onek t3 where t3.two = t2.two offset 0) s
       on t2.unique1 = 1;
-                    QUERY PLAN                    
---------------------------------------------------
+                 QUERY PLAN                  
+---------------------------------------------
  Nested Loop Left Join
    ->  Seq Scan on onek t1
    ->  Materialize
          ->  Nested Loop Left Join
                Join Filter: (t2.unique1 = 1)
                ->  Seq Scan on onek t2
-               ->  Memoize
-                     Cache Key: t2.two
-                     Cache Mode: binary
-                     ->  Seq Scan on onek t3
-                           Filter: (two = t2.two)
-(11 rows)
+               ->  Seq Scan on onek t3
+                     Filter: (two = t2.two)
+(8 rows)
 
 --
 -- check a case where we formerly got confused by conflicting sort orders
@@ -3367,12 +3362,12 @@ select 1 from tenk1
 where (hundred, thousand) in (select twothousand, twothousand from onek);
                    QUERY PLAN                    
 -------------------------------------------------
- Hash Semi Join
-   Hash Cond: (tenk1.hundred = onek.twothousand)
-   ->  Seq Scan on tenk1
-         Filter: (hundred = thousand)
+ Hash Right Semi Join
+   Hash Cond: (onek.twothousand = tenk1.hundred)
+   ->  Seq Scan on onek
    ->  Hash
-         ->  Seq Scan on onek
+         ->  Seq Scan on tenk1
+               Filter: (hundred = thousand)
 (6 rows)
 
 reset enable_memoize;
@@ -3386,13 +3381,13 @@ create temp table tbl_anti(a int not null, b int, c int);
 explain (costs off)
 select * from tenk1 t1 left join tbl_anti t2 on t1.unique1 = t2.b
 where t2.a is null;
-            QUERY PLAN            
-----------------------------------
- Hash Right Anti Join
-   Hash Cond: (t2.b = t1.unique1)
-   ->  Seq Scan on tbl_anti t2
+             QUERY PLAN              
+-------------------------------------
+ Hash Anti Join
+   Hash Cond: (t1.unique1 = t2.b)
+   ->  Seq Scan on tenk1 t1
    ->  Hash
-         ->  Seq Scan on tenk1 t1
+         ->  Seq Scan on tbl_anti t2
 (5 rows)
 
 -- this is an antijoin, as t2.a is non-null for any matching row
@@ -3502,19 +3497,17 @@ select * from tenk1 t1 left join
   (select t2.c from tbl_anti t2
    where exists (select 1 from tbl_anti t3 where t2.c = t3.c)) ss on true
 where ss.c is null;
-                      QUERY PLAN                       
--------------------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Nested Loop Anti Join
    ->  Seq Scan on tenk1 t1
    ->  Materialize
-         ->  Hash Join
+         ->  Hash Semi Join
                Hash Cond: (t2.c = t3.c)
                ->  Seq Scan on tbl_anti t2
                ->  Hash
-                     ->  HashAggregate
-                           Group Key: t3.c
-                           ->  Seq Scan on tbl_anti t3
-(10 rows)
+                     ->  Seq Scan on tbl_anti t3
+(8 rows)
 
 -- this is not an antijoin: the join clause t2.c = t3.c cannot guarantee t3.c
 -- is non-null
@@ -3628,17 +3621,17 @@ explain (costs off)
 select * from tbl_anti t1 full join
   (tbl_anti t2 join tbl_anti t3 on t2.c = t3.c) on t1.b = t2.b
 where t3.c is null;
-                   QUERY PLAN                    
--------------------------------------------------
- Hash Anti Join
-   Hash Cond: (t1.b = t2.b)
-   ->  Seq Scan on tbl_anti t1
+                QUERY PLAN                 
+-------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t2.b = t1.b)
+   ->  Hash Join
+         Hash Cond: (t2.c = t3.c)
+         ->  Seq Scan on tbl_anti t2
+         ->  Hash
+               ->  Seq Scan on tbl_anti t3
    ->  Hash
-         ->  Hash Join
-               Hash Cond: (t2.c = t3.c)
-               ->  Seq Scan on tbl_anti t2
-               ->  Hash
-                     ->  Seq Scan on tbl_anti t3
+         ->  Seq Scan on tbl_anti t1
 (9 rows)
 
 -- the symmetric case, with the forced-null Var on the left side
@@ -3646,17 +3639,17 @@ explain (costs off)
 select * from (tbl_anti t1 join tbl_anti t4 on t1.c = t4.c)
   full join tbl_anti t2 on t1.b = t2.b
 where t1.c is null;
-                   QUERY PLAN                    
--------------------------------------------------
- Hash Anti Join
-   Hash Cond: (t2.b = t1.b)
-   ->  Seq Scan on tbl_anti t2
+                QUERY PLAN                 
+-------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t1.b = t2.b)
+   ->  Hash Join
+         Hash Cond: (t1.c = t4.c)
+         ->  Seq Scan on tbl_anti t1
+         ->  Hash
+               ->  Seq Scan on tbl_anti t4
    ->  Hash
-         ->  Hash Join
-               Hash Cond: (t1.c = t4.c)
-               ->  Seq Scan on tbl_anti t1
-               ->  Hash
-                     ->  Seq Scan on tbl_anti t4
+         ->  Seq Scan on tbl_anti t2
 (9 rows)
 
 -- this is not an antijoin: the join clause cannot prove t2.b non-null in the
@@ -3695,17 +3688,17 @@ explain (costs off)
 select * from tbl_anti t1 full join
   (tbl_anti t2 left join tbl_anti t3 on t2.c = t3.c) on t1.b = t2.b
 where t2.a is null;
-                   QUERY PLAN                    
--------------------------------------------------
- Hash Anti Join
-   Hash Cond: (t1.b = t2.b)
-   ->  Seq Scan on tbl_anti t1
+                QUERY PLAN                 
+-------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t2.b = t1.b)
+   ->  Hash Left Join
+         Hash Cond: (t2.c = t3.c)
+         ->  Seq Scan on tbl_anti t2
+         ->  Hash
+               ->  Seq Scan on tbl_anti t3
    ->  Hash
-         ->  Hash Left Join
-               Hash Cond: (t2.c = t3.c)
-               ->  Seq Scan on tbl_anti t2
-               ->  Hash
-                     ->  Seq Scan on tbl_anti t3
+         ->  Seq Scan on tbl_anti t1
 (9 rows)
 
 -- this is not an antijoin: t3 can be nulled by the t2/t3 join, so its NOT NULL
@@ -3826,13 +3819,13 @@ where t2 is null;
 explain (costs off)
 select * from tenk1 t1 left join tbl_wr t2 on t1.unique1 = t2.b
 where t2 is null;
-            QUERY PLAN            
-----------------------------------
- Hash Right Anti Join
-   Hash Cond: (t2.b = t1.unique1)
-   ->  Seq Scan on tbl_wr t2
+            QUERY PLAN             
+-----------------------------------
+ Hash Anti Join
+   Hash Cond: (t1.unique1 = t2.b)
+   ->  Seq Scan on tenk1 t1
    ->  Hash
-         ->  Seq Scan on tenk1 t1
+         ->  Seq Scan on tbl_wr t2
 (5 rows)
 
 -- this is an antijoin: the strict join clause within the RHS subtree proves
@@ -3970,14 +3963,14 @@ where t2 is not null;
 explain (costs off)
 select * from tbl_wr t1 full join tbl_wr t2 on t1.b = t2.b
 where t1 is not null;
-             QUERY PLAN             
-------------------------------------
- Hash Left Join
-   Hash Cond: (t1.b = t2.b)
-   ->  Seq Scan on tbl_wr t1
-         Filter: (t1.* IS NOT NULL)
+                QUERY PLAN                
+------------------------------------------
+ Hash Right Join
+   Hash Cond: (t2.b = t1.b)
+   ->  Seq Scan on tbl_wr t2
    ->  Hash
-         ->  Seq Scan on tbl_wr t2
+         ->  Seq Scan on tbl_wr t1
+               Filter: (t1.* IS NOT NULL)
 (6 rows)
 
 -- composite-type columns: reduced to an inner join
@@ -3985,14 +3978,14 @@ create temp table tbl_comp (a int, w tbl_wr);
 explain (costs off)
 select * from tenk1 t1 left join tbl_comp t2 on t1.unique1 = t2.a
 where t2.w is not null;
-            QUERY PLAN            
-----------------------------------
+              QUERY PLAN               
+---------------------------------------
  Hash Join
-   Hash Cond: (t2.a = t1.unique1)
-   ->  Seq Scan on tbl_comp t2
-         Filter: (w IS NOT NULL)
+   Hash Cond: (t1.unique1 = t2.a)
+   ->  Seq Scan on tenk1 t1
    ->  Hash
-         ->  Seq Scan on tenk1 t1
+         ->  Seq Scan on tbl_comp t2
+               Filter: (w IS NOT NULL)
 (6 rows)
 
 -- composite-type columns: reduced to an antijoin
@@ -5514,16 +5507,12 @@ select * from t t1
                Output: t3.i3
                Replaces: Scan on t3
                One-Time Filter: false
-   ->  Memoize
+   ->  Bitmap Heap Scan on pg_temp.t t4
          Output: t4.i4
-         Cache Key: (1)
-         Cache Mode: binary
-         ->  Bitmap Heap Scan on pg_temp.t t4
-               Output: t4.i4
-               Recheck Cond: (t4.i4 > (1))
-               ->  Bitmap Index Scan on t_pkey
-                     Index Cond: (t4.i4 > (1))
-(28 rows)
+         Recheck Cond: (t4.i4 > (1))
+         ->  Bitmap Index Scan on t_pkey
+               Index Cond: (t4.i4 > (1))
+(24 rows)
 
 explain (verbose, costs off)
 select * from
@@ -6216,19 +6205,18 @@ select * from tenk1 a join tenk1 b on
 -------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Join Filter: ((a.unique1 < 20) OR (a.unique1 = 3) OR ((a.unique1 = 1) AND (b.unique1 = 2)) OR (((a.unique2 = 3) OR (a.unique2 = 7)) AND (b.hundred = 4)))
+   ->  Bitmap Heap Scan on tenk1 a
+         Recheck Cond: ((unique1 < 20) OR ((unique1 = 3) OR (unique1 = 1)) OR ((unique2 = 3) OR (unique2 = 7)))
+         Filter: ((unique1 < 20) OR (unique1 = 3) OR (unique1 = 1) OR (unique2 = 3) OR (unique2 = 7))
+         ->  BitmapOr
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 < 20)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 = ANY ('{3,1}'::integer[]))
+               ->  Bitmap Index Scan on tenk1_unique2
+                     Index Cond: (unique2 = ANY ('{3,7}'::integer[]))
    ->  Seq Scan on tenk1 b
-   ->  Materialize
-         ->  Bitmap Heap Scan on tenk1 a
-               Recheck Cond: ((unique1 < 20) OR ((unique1 = 3) OR (unique1 = 1)) OR ((unique2 = 3) OR (unique2 = 7)))
-               Filter: ((unique1 < 20) OR (unique1 = 3) OR (unique1 = 1) OR (unique2 = 3) OR (unique2 = 7))
-               ->  BitmapOr
-                     ->  Bitmap Index Scan on tenk1_unique1
-                           Index Cond: (unique1 < 20)
-                     ->  Bitmap Index Scan on tenk1_unique1
-                           Index Cond: (unique1 = ANY ('{3,1}'::integer[]))
-                     ->  Bitmap Index Scan on tenk1_unique2
-                           Index Cond: (unique2 = ANY ('{3,7}'::integer[]))
-(14 rows)
+(13 rows)
 
 --
 -- test placement of movable quals in a parameterized join tree
@@ -6238,44 +6226,46 @@ select * from tenk1 t1 left join
   (tenk1 t2 join tenk1 t3 on t2.thousand = t3.unique2)
   on t1.hundred = t2.hundred and t1.ten = t3.ten
 where t1.unique1 = 1;
-                       QUERY PLAN                       
---------------------------------------------------------
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Nested Loop Left Join
    ->  Bitmap Heap Scan on tenk1 t1
          Recheck Cond: (unique1 = 1)
          ->  Bitmap Index Scan on tenk1_unique1
                Index Cond: (unique1 = 1)
-   ->  Nested Loop
+   ->  Hash Join
+         Hash Cond: (t3.unique2 = t2.thousand)
          Join Filter: (t1.ten = t3.ten)
-         ->  Bitmap Heap Scan on tenk1 t2
-               Recheck Cond: (t1.hundred = hundred)
-               ->  Bitmap Index Scan on tenk1_hundred
-                     Index Cond: (hundred = t1.hundred)
-         ->  Index Scan using tenk1_unique2 on tenk1 t3
-               Index Cond: (unique2 = t2.thousand)
-(13 rows)
+         ->  Seq Scan on tenk1 t3
+         ->  Hash
+               ->  Bitmap Heap Scan on tenk1 t2
+                     Recheck Cond: (t1.hundred = hundred)
+                     ->  Bitmap Index Scan on tenk1_hundred
+                           Index Cond: (hundred = t1.hundred)
+(14 rows)
 
 explain (costs off)
 select * from tenk1 t1 left join
   (tenk1 t2 join tenk1 t3 on t2.thousand = t3.unique2)
   on t1.hundred = t2.hundred and t1.ten + t2.ten = t3.ten
 where t1.unique1 = 1;
-                       QUERY PLAN                       
---------------------------------------------------------
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Nested Loop Left Join
    ->  Bitmap Heap Scan on tenk1 t1
          Recheck Cond: (unique1 = 1)
          ->  Bitmap Index Scan on tenk1_unique1
                Index Cond: (unique1 = 1)
-   ->  Nested Loop
+   ->  Hash Join
+         Hash Cond: (t3.unique2 = t2.thousand)
          Join Filter: ((t1.ten + t2.ten) = t3.ten)
-         ->  Bitmap Heap Scan on tenk1 t2
-               Recheck Cond: (t1.hundred = hundred)
-               ->  Bitmap Index Scan on tenk1_hundred
-                     Index Cond: (hundred = t1.hundred)
-         ->  Index Scan using tenk1_unique2 on tenk1 t3
-               Index Cond: (unique2 = t2.thousand)
-(13 rows)
+         ->  Seq Scan on tenk1 t3
+         ->  Hash
+               ->  Bitmap Heap Scan on tenk1 t2
+                     Recheck Cond: (t1.hundred = hundred)
+                     ->  Bitmap Index Scan on tenk1_hundred
+                           Index Cond: (hundred = t1.hundred)
+(14 rows)
 
 explain (costs off)
 select count(*) from
@@ -8183,9 +8173,8 @@ from int8_tbl t1
                Recheck Cond: (t2.q1 > unique1)
                ->  Bitmap Index Scan on onek_unique1
                      Index Cond: (unique1 < t2.q1)
-   ->  Materialize
-         ->  Seq Scan on onek t4
-(14 rows)
+   ->  Seq Scan on onek t4
+(13 rows)
 
 -- bug #19460: we need to clean up RestrictInfos more than we had been doing
 explain (costs off)
@@ -12567,23 +12556,19 @@ select * from fkest f1
   join fkest f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
   join fkest f3 on f1.x = f3.x
   where f1.x100 = 2;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                        QUERY PLAN                         
+-----------------------------------------------------------
  Nested Loop
    ->  Hash Join
          Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
-         ->  Bitmap Heap Scan on fkest f2
-               Recheck Cond: (x100 = 2)
-               ->  Bitmap Index Scan on fkest_x_x10_x100_idx
-                     Index Cond: (x100 = 2)
+         ->  Seq Scan on fkest f2
+               Filter: (x100 = 2)
          ->  Hash
-               ->  Bitmap Heap Scan on fkest f1
-                     Recheck Cond: (x100 = 2)
-                     ->  Bitmap Index Scan on fkest_x_x10_x100_idx
-                           Index Cond: (x100 = 2)
+               ->  Seq Scan on fkest f1
+                     Filter: (x100 = 2)
    ->  Index Scan using fkest_x_x10_x100_idx on fkest f3
          Index Cond: (x = f1.x)
-(14 rows)
+(10 rows)
 
 alter table fkest add constraint fk
   foreign key (x, x10b, x100) references fkest (x, x10, x100);
@@ -12592,24 +12577,20 @@ select * from fkest f1
   join fkest f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
   join fkest f3 on f1.x = f3.x
   where f1.x100 = 2;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Hash Join
    Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
    ->  Hash Join
          Hash Cond: (f3.x = f2.x)
          ->  Seq Scan on fkest f3
          ->  Hash
-               ->  Bitmap Heap Scan on fkest f2
-                     Recheck Cond: (x100 = 2)
-                     ->  Bitmap Index Scan on fkest_x_x10_x100_idx
-                           Index Cond: (x100 = 2)
+               ->  Seq Scan on fkest f2
+                     Filter: (x100 = 2)
    ->  Hash
-         ->  Bitmap Heap Scan on fkest f1
-               Recheck Cond: (x100 = 2)
-               ->  Bitmap Index Scan on fkest_x_x10_x100_idx
-                     Index Cond: (x100 = 2)
-(15 rows)
+         ->  Seq Scan on fkest f1
+               Filter: (x100 = 2)
+(11 rows)
 
 rollback;
 --
@@ -13074,22 +13055,24 @@ from onek t1, tenk1 t2
 where exists (select 1 from j3
               where j3.unique1 = t1.unique1 and j3.tenthous = t2.hundred)
       and t1.unique1 < 1;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
- Nested Loop
+                                                                                              QUERY PLAN                                                                                               
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join
    Output: t1.unique1, t2.hundred
-   ->  Nested Loop
+   Hash Cond: (t2.hundred = j3.tenthous)
+   ->  Seq Scan on public.tenk1 t2
+         Output: t2.unique1, t2.unique2, t2.two, t2.four, t2.ten, t2.twenty, t2.hundred, t2.thousand, t2.twothousand, t2.fivethous, t2.tenthous, t2.odd, t2.even, t2.stringu1, t2.stringu2, t2.string4
+   ->  Hash
          Output: t1.unique1, j3.tenthous
-         ->  Index Only Scan using onek_unique1 on public.onek t1
-               Output: t1.unique1
-               Index Cond: (t1.unique1 < 1)
-         ->  Index Only Scan using j3_unique1_tenthous_idx on public.j3
-               Output: j3.unique1, j3.tenthous
-               Index Cond: (j3.unique1 = t1.unique1)
-   ->  Index Only Scan using tenk1_hundred on public.tenk1 t2
-         Output: t2.hundred
-         Index Cond: (t2.hundred = j3.tenthous)
-(13 rows)
+         ->  Nested Loop
+               Output: t1.unique1, j3.tenthous
+               ->  Index Only Scan using onek_unique1 on public.onek t1
+                     Output: t1.unique1
+                     Index Cond: (t1.unique1 < 1)
+               ->  Index Only Scan using j3_unique1_tenthous_idx on public.j3
+                     Output: j3.unique1, j3.tenthous
+                     Index Cond: (j3.unique1 = t1.unique1)
+(15 rows)
 
 drop table j3;
 -- Exercise the "skip fetch" Bitmap Heap Scan optimization when candidate

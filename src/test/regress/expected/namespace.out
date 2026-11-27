@@ -147,6 +147,8 @@ NOTICE:  current search_path: pg_catalog, pg_temp
 CLUSTER test_maint_search_path.test_maint USING test_maint_idx;
 NOTICE:  current search_path: pg_catalog, pg_temp
 NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
+NOTICE:  current search_path: pg_catalog, pg_temp
 REFRESH MATERIALIZED VIEW test_maint_search_path.test_maint_mv;
 NOTICE:  current search_path: pg_catalog, pg_temp
 NOTICE:  current search_path: pg_catalog, pg_temp

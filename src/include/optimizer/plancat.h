@@ -64,6 +64,8 @@ extern Selectivity function_selectivity(PlannerInfo *root,
 
 extern void add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
 							  QualCost *cost);
+extern void add_expr_cost(PlannerInfo *root, Oid funcid, Node *node,
+						  QualCost *cost);
 
 extern double get_function_rows(PlannerInfo *root, Oid funcid, Node *node);
 

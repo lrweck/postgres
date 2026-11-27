@@ -457,17 +457,19 @@ set session authorization regress_user_ectest;
 explain (costs off)
   select * from ec0 a, ec1 b
   where a.ff = b.ff and a.ff = 43::bigint::int8alias1;
-                 QUERY PLAN                  
----------------------------------------------
+                    QUERY PLAN                     
+---------------------------------------------------
  Nested Loop
-   ->  Index Scan using ec0_pkey on ec0 a
-         Index Cond: (ff = '43'::int8alias1)
+   ->  Bitmap Heap Scan on ec0 a
+         Recheck Cond: (ff = '43'::int8alias1)
+         ->  Bitmap Index Scan on ec0_pkey
+               Index Cond: (ff = '43'::int8alias1)
    ->  Bitmap Heap Scan on ec1 b
          Recheck Cond: (a.ff = ff)
          Filter: (f1 < '5'::int8alias1)
          ->  Bitmap Index Scan on ec1_pkey
                Index Cond: (ff = a.ff)
-(8 rows)
+(10 rows)
 
 reset session authorization;
 revoke select on ec0 from regress_user_ectest;

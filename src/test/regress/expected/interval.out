@@ -2038,10 +2038,10 @@ FROM (VALUES (date '-infinity'),
     date    | interval  |          plus          |         minus          
 ------------+-----------+------------------------+------------------------
  -infinity  | -infinity | -infinity              | timestamp out of range
- -infinity  | infinity  | timestamp out of range | -infinity
  1995-08-06 | -infinity | -infinity              | infinity
- 1995-08-06 | infinity  | infinity               | -infinity
  infinity   | -infinity | timestamp out of range | infinity
+ -infinity  | infinity  | timestamp out of range | -infinity
+ 1995-08-06 | infinity  | infinity               | -infinity
  infinity   | infinity  | infinity               | timestamp out of range
 (6 rows)
 
@@ -2086,10 +2086,10 @@ FROM (VALUES (timestamp '-infinity'),
       timestamp      | interval  |          plus          |         minus          
 ---------------------+-----------+------------------------+------------------------
  -infinity           | -infinity | -infinity              | timestamp out of range
- -infinity           | infinity  | timestamp out of range | -infinity
  1995-08-06 12:30:15 | -infinity | -infinity              | infinity
- 1995-08-06 12:30:15 | infinity  | infinity               | -infinity
  infinity            | -infinity | timestamp out of range | infinity
+ -infinity           | infinity  | timestamp out of range | -infinity
+ 1995-08-06 12:30:15 | infinity  | infinity               | -infinity
  infinity            | infinity  | infinity               | timestamp out of range
 (6 rows)
 
@@ -2104,10 +2104,10 @@ FROM (VALUES (timestamptz '-infinity'),
      timestamptz     | interval  |          plus          |         minus          
 ---------------------+-----------+------------------------+------------------------
  -infinity           | -infinity | -infinity              | timestamp out of range
- -infinity           | infinity  | timestamp out of range | -infinity
  1995-08-06 12:30:15 | -infinity | -infinity              | infinity
- 1995-08-06 12:30:15 | infinity  | infinity               | -infinity
  infinity            | -infinity | timestamp out of range | infinity
+ -infinity           | infinity  | timestamp out of range | -infinity
+ 1995-08-06 12:30:15 | infinity  | infinity               | -infinity
  infinity            | infinity  | infinity               | timestamp out of range
 (6 rows)
 

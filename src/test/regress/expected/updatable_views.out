@@ -508,8 +508,8 @@ MERGE INTO rw_view1 t
  merge_action | a |   b   |             old              |                  new                   | a |   b   |   c   |    d     | a |      b      |   c   |       d        | a |      b      |   c   |       d        
 --------------+---+-------+------------------------------+----------------------------------------+---+-------+-------+----------+---+-------------+-------+----------------+---+-------------+-------+----------------
  UPDATE       | 1 | ROW 1 | (1,"Row 1",Const,"b: Row 1") | (1,"ROW 1",Const,"b: ROW 1")           | 1 | Row 1 | Const | b: Row 1 | 1 | ROW 1       | Const | b: ROW 1       | 1 | ROW 1       | Const | b: ROW 1
- INSERT       | 2 | ROW 2 |                              | (2,Unspecified,Const,"b: Unspecified") |   |       |       |          | 2 | Unspecified | Const | b: Unspecified | 2 | Unspecified | Const | b: Unspecified
  DELETE       | 3 | ROW 3 | (3,"Row 3",Const,"b: Row 3") |                                        | 3 | Row 3 | Const | b: Row 3 |   |             |       |                | 3 | Row 3       | Const | b: Row 3
+ INSERT       | 2 | ROW 2 |                              | (2,Unspecified,Const,"b: Unspecified") |   |       |       |          | 2 | Unspecified | Const | b: Unspecified | 2 | Unspecified | Const | b: Unspecified
 (3 rows)
 
 SET jit_above_cost TO DEFAULT;
@@ -534,8 +534,8 @@ MERGE INTO rw_view1 t
   RETURNING merge_action(), v.*, old, new, old.*, new.*, t.*;
  merge_action | a | b  |                  old                   |                  new                   | a |      b      |   c   |       d        | a |      b      |   c   |       d        | a |      b      |   c   |       d        
 --------------+---+----+----------------------------------------+----------------------------------------+---+-------------+-------+----------------+---+-------------+-------+----------------+---+-------------+-------+----------------
- UPDATE       | 1 | R1 | (1,"ROW 1",Const,"b: ROW 1")           | (1,R1,Const,"b: R1")                   | 1 | ROW 1       | Const | b: ROW 1       | 1 | R1          | Const | b: R1          | 1 | R1          | Const | b: R1
  DELETE       |   |    | (5,Unspecified,Const,"b: Unspecified") |                                        | 5 | Unspecified | Const | b: Unspecified |   |             |       |                | 5 | Unspecified | Const | b: Unspecified
+ UPDATE       | 1 | R1 | (1,"ROW 1",Const,"b: ROW 1")           | (1,R1,Const,"b: R1")                   | 1 | ROW 1       | Const | b: ROW 1       | 1 | R1          | Const | b: R1          | 1 | R1          | Const | b: R1
  DELETE       | 2 | R2 | (2,Unspecified,Const,"b: Unspecified") |                                        | 2 | Unspecified | Const | b: Unspecified |   |             |       |                | 2 | Unspecified | Const | b: Unspecified
  INSERT       | 3 | R3 |                                        | (3,Unspecified,Const,"b: Unspecified") |   |             |       |                | 3 | Unspecified | Const | b: Unspecified | 3 | Unspecified | Const | b: Unspecified
 (4 rows)
@@ -586,14 +586,16 @@ EXPLAIN (costs off)
 MERGE INTO rw_view1 t
   USING (SELECT * FROM generate_series(1,5)) AS s(a) ON t.a = s.a
   WHEN MATCHED THEN UPDATE SET b = 'Updated';
-                                  QUERY PLAN                                   
--------------------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Merge on base_tbl
-   ->  Nested Loop
-         ->  Function Scan on generate_series
-         ->  Index Scan using base_tbl_pkey on base_tbl
-               Index Cond: ((a = generate_series.generate_series) AND (a > 0))
-(5 rows)
+   ->  Hash Join
+         Hash Cond: (base_tbl.a = generate_series.generate_series)
+         ->  Seq Scan on base_tbl
+               Filter: (a > 0)
+         ->  Hash
+               ->  Function Scan on generate_series
+(7 rows)
 
 EXPLAIN (costs off)
 MERGE INTO rw_view1 t
@@ -604,26 +606,26 @@ MERGE INTO rw_view1 t
  Merge on base_tbl
    ->  Hash Left Join
          Hash Cond: (base_tbl.a = generate_series.generate_series)
-         ->  Bitmap Heap Scan on base_tbl
-               Recheck Cond: (a > 0)
-               ->  Bitmap Index Scan on base_tbl_pkey
-                     Index Cond: (a > 0)
+         ->  Seq Scan on base_tbl
+               Filter: (a > 0)
          ->  Hash
                ->  Function Scan on generate_series
-(9 rows)
+(7 rows)
 
 EXPLAIN (costs off)
 MERGE INTO rw_view1 t
   USING (SELECT * FROM generate_series(1,5)) AS s(a) ON t.a = s.a
   WHEN NOT MATCHED THEN INSERT (a) VALUES (s.a);
-                                  QUERY PLAN                                   
--------------------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Merge on base_tbl
-   ->  Nested Loop Left Join
-         ->  Function Scan on generate_series
-         ->  Index Scan using base_tbl_pkey on base_tbl
-               Index Cond: ((a = generate_series.generate_series) AND (a > 0))
-(5 rows)
+   ->  Hash Right Join
+         Hash Cond: (base_tbl.a = generate_series.generate_series)
+         ->  Seq Scan on base_tbl
+               Filter: (a > 0)
+         ->  Hash
+               ->  Function Scan on generate_series
+(7 rows)
 
 -- it's still updatable if we add a DO ALSO rule
 CREATE TABLE base_tbl_hist(ts timestamptz default now(), a int, b text);
@@ -969,11 +971,9 @@ EXPLAIN (costs off) UPDATE rw_view2 SET a=3 WHERE a=2;
                      Index Cond: (a = 2)
          ->  Subquery Scan on rw_view1
                Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
-               ->  Bitmap Heap Scan on base_tbl base_tbl_1
-                     Recheck Cond: (a > 0)
-                     ->  Bitmap Index Scan on base_tbl_pkey
-                           Index Cond: (a > 0)
-(12 rows)
+               ->  Seq Scan on base_tbl base_tbl_1
+                     Filter: (a > 0)
+(10 rows)
 
 EXPLAIN (costs off) DELETE FROM rw_view2 WHERE a=2;
                            QUERY PLAN                           
@@ -986,11 +986,9 @@ EXPLAIN (costs off) DELETE FROM rw_view2 WHERE a=2;
                      Index Cond: (a = 2)
          ->  Subquery Scan on rw_view1
                Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
-               ->  Bitmap Heap Scan on base_tbl base_tbl_1
-                     Recheck Cond: (a > 0)
-                     ->  Bitmap Index Scan on base_tbl_pkey
-                           Index Cond: (a > 0)
-(12 rows)
+               ->  Seq Scan on base_tbl base_tbl_1
+                     Filter: (a > 0)
+(10 rows)
 
 DROP TABLE base_tbl CASCADE;
 NOTICE:  drop cascades to 2 other objects
@@ -1262,11 +1260,9 @@ EXPLAIN (costs off) UPDATE rw_view2 SET a=3 WHERE a=2;
  Update on rw_view1 rw_view1_1
    ->  Subquery Scan on rw_view1
          Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
-         ->  Bitmap Heap Scan on base_tbl
-               Recheck Cond: (a > 0)
-               ->  Bitmap Index Scan on base_tbl_pkey
-                     Index Cond: (a > 0)
-(7 rows)
+         ->  Seq Scan on base_tbl
+               Filter: (a > 0)
+(5 rows)
 
 EXPLAIN (costs off) DELETE FROM rw_view2 WHERE a=2;
                         QUERY PLAN                        
@@ -1274,11 +1270,9 @@ EXPLAIN (costs off) DELETE FROM rw_view2 WHERE a=2;
  Delete on rw_view1 rw_view1_1
    ->  Subquery Scan on rw_view1
          Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
-         ->  Bitmap Heap Scan on base_tbl
-               Recheck Cond: (a > 0)
-               ->  Bitmap Index Scan on base_tbl_pkey
-                     Index Cond: (a > 0)
-(7 rows)
+         ->  Seq Scan on base_tbl
+               Filter: (a > 0)
+(5 rows)
 
 EXPLAIN (costs off)
 MERGE INTO rw_view2 t
@@ -1286,20 +1280,18 @@ MERGE INTO rw_view2 t
   WHEN MATCHED AND t.a <= 1 THEN DELETE
   WHEN MATCHED THEN UPDATE SET b = s.b
   WHEN NOT MATCHED AND s.a > 0 THEN INSERT VALUES (s.a, s.b);
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  Merge on rw_view1 rw_view1_1
    ->  Hash Right Join
          Hash Cond: (rw_view1.a = x.x)
          ->  Subquery Scan on rw_view1
                Filter: (rw_view1.a < 10)
-               ->  Bitmap Heap Scan on base_tbl
-                     Recheck Cond: (a > 0)
-                     ->  Bitmap Index Scan on base_tbl_pkey
-                           Index Cond: (a > 0)
+               ->  Seq Scan on base_tbl
+                     Filter: (a > 0)
          ->  Hash
                ->  Function Scan on generate_series x
-(11 rows)
+(9 rows)
 
 -- MERGE with incomplete set of INSTEAD OF triggers
 DROP TRIGGER rw_view1_del_trig ON rw_view1;
@@ -3110,8 +3102,8 @@ MERGE INTO rw_view2 t
   USING (VALUES ('Tom'), ('Dick'), ('Harry')) AS v(person) ON t.person = v.person
   WHEN MATCHED AND snoop(t.person) THEN UPDATE SET person = v.person;
 NOTICE:  snooped value: Tom
-NOTICE:  snooped value: Tom
 NOTICE:  snooped value: Harry
+NOTICE:  snooped value: Tom
 NOTICE:  snooped value: Harry
 EXPLAIN (costs off) SELECT * FROM rw_view2 WHERE snoop(person);
                      QUERY PLAN                      
@@ -3144,15 +3136,15 @@ EXPLAIN (costs off)
 MERGE INTO rw_view2 t
   USING (VALUES ('Tom'), ('Dick'), ('Harry')) AS v(person) ON t.person = v.person
   WHEN MATCHED AND snoop(t.person) THEN UPDATE SET person = v.person;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
  Merge on base_tbl
    ->  Hash Join
-         Hash Cond: (base_tbl.person = "*VALUES*".column1)
-         ->  Seq Scan on base_tbl
-               Filter: ((visibility = 'public'::text) AND snoop(person))
+         Hash Cond: ("*VALUES*".column1 = base_tbl.person)
+         ->  Values Scan on "*VALUES*"
          ->  Hash
-               ->  Values Scan on "*VALUES*"
+               ->  Seq Scan on base_tbl
+                     Filter: ((visibility = 'public'::text) AND snoop(person))
 (7 rows)
 
 DROP TABLE base_tbl CASCADE;
@@ -3307,8 +3299,8 @@ SELECT * FROM v1 WHERE a=8;
 
 EXPLAIN (VERBOSE, COSTS OFF)
 UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
-                                                    QUERY PLAN                                                    
-------------------------------------------------------------------------------------------------------------------
+                                                                     QUERY PLAN                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------
  Update on public.t1
    Update on public.t1 t1_1
    Update on public.t11 t1_2
@@ -3317,37 +3309,25 @@ UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
    ->  Result
          Output: 100, t1.tableoid, t1.ctid
          ->  Append
-               ->  Bitmap Heap Scan on public.t1 t1_1
+               ->  Seq Scan on public.t1 t1_1
                      Output: t1_1.tableoid, t1_1.ctid
-                     Recheck Cond: ((t1_1.a > 5) AND (t1_1.a < 7))
-                     Filter: ((t1_1.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_1.a) AND leakproof(t1_1.a))
-                     ->  Bitmap Index Scan on t1_a_idx
-                           Index Cond: ((t1_1.a > 5) AND (t1_1.a < 7))
+                     Filter: ((t1_1.a > 5) AND (t1_1.a < 7) AND (t1_1.a <> 6) AND leakproof(t1_1.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_1.a))
                      SubPlan exists_1
                        ->  Append
                              ->  Seq Scan on public.t12 t12_1
                                    Filter: (t12_1.a = t1_1.a)
                              ->  Seq Scan on public.t111 t12_2
                                    Filter: (t12_2.a = t1_1.a)
-               ->  Bitmap Heap Scan on public.t11 t1_2
+               ->  Seq Scan on public.t11 t1_2
                      Output: t1_2.tableoid, t1_2.ctid
-                     Recheck Cond: ((t1_2.a > 5) AND (t1_2.a < 7))
-                     Filter: ((t1_2.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_2.a) AND leakproof(t1_2.a))
-                     ->  Bitmap Index Scan on t11_a_idx
-                           Index Cond: ((t1_2.a > 5) AND (t1_2.a < 7))
-               ->  Bitmap Heap Scan on public.t12 t1_3
+                     Filter: ((t1_2.a > 5) AND (t1_2.a < 7) AND (t1_2.a <> 6) AND leakproof(t1_2.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_2.a))
+               ->  Seq Scan on public.t12 t1_3
                      Output: t1_3.tableoid, t1_3.ctid
-                     Recheck Cond: ((t1_3.a > 5) AND (t1_3.a < 7))
-                     Filter: ((t1_3.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_3.a) AND leakproof(t1_3.a))
-                     ->  Bitmap Index Scan on t12_a_idx
-                           Index Cond: ((t1_3.a > 5) AND (t1_3.a < 7))
-               ->  Bitmap Heap Scan on public.t111 t1_4
+                     Filter: ((t1_3.a > 5) AND (t1_3.a < 7) AND (t1_3.a <> 6) AND leakproof(t1_3.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_3.a))
+               ->  Seq Scan on public.t111 t1_4
                      Output: t1_4.tableoid, t1_4.ctid
-                     Recheck Cond: ((t1_4.a > 5) AND (t1_4.a < 7))
-                     Filter: ((t1_4.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_4.a) AND leakproof(t1_4.a))
-                     ->  Bitmap Index Scan on t111_a_idx
-                           Index Cond: ((t1_4.a > 5) AND (t1_4.a < 7))
-(38 rows)
+                     Filter: ((t1_4.a > 5) AND (t1_4.a < 7) AND (t1_4.a <> 6) AND leakproof(t1_4.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_4.a))
+(26 rows)
 
 UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
 SELECT * FROM v1 WHERE a=100; -- Nothing should have been changed to 100
@@ -3362,8 +3342,8 @@ SELECT * FROM t1 WHERE a=100; -- Nothing should have been changed to 100
 
 EXPLAIN (VERBOSE, COSTS OFF)
 UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
  Update on public.t1
    Update on public.t1 t1_1
    Update on public.t11 t1_2
@@ -3372,37 +3352,25 @@ UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
    ->  Result
          Output: (t1.a + 1), t1.tableoid, t1.ctid
          ->  Append
-               ->  Bitmap Heap Scan on public.t1 t1_1
+               ->  Seq Scan on public.t1 t1_1
                      Output: t1_1.a, t1_1.tableoid, t1_1.ctid
-                     Recheck Cond: ((t1_1.a > 5) AND (t1_1.a = 8))
-                     Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_1.a) AND leakproof(t1_1.a))
-                     ->  Bitmap Index Scan on t1_a_idx
-                           Index Cond: ((t1_1.a > 5) AND (t1_1.a = 8))
+                     Filter: ((t1_1.a > 5) AND (t1_1.a = 8) AND leakproof(t1_1.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_1.a))
                      SubPlan exists_1
                        ->  Append
                              ->  Seq Scan on public.t12 t12_1
                                    Filter: (t12_1.a = t1_1.a)
                              ->  Seq Scan on public.t111 t12_2
                                    Filter: (t12_2.a = t1_1.a)
-               ->  Bitmap Heap Scan on public.t11 t1_2
+               ->  Seq Scan on public.t11 t1_2
                      Output: t1_2.a, t1_2.tableoid, t1_2.ctid
-                     Recheck Cond: ((t1_2.a > 5) AND (t1_2.a = 8))
-                     Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_2.a) AND leakproof(t1_2.a))
-                     ->  Bitmap Index Scan on t11_a_idx
-                           Index Cond: ((t1_2.a > 5) AND (t1_2.a = 8))
-               ->  Bitmap Heap Scan on public.t12 t1_3
+                     Filter: ((t1_2.a > 5) AND (t1_2.a = 8) AND leakproof(t1_2.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_2.a))
+               ->  Seq Scan on public.t12 t1_3
                      Output: t1_3.a, t1_3.tableoid, t1_3.ctid
-                     Recheck Cond: ((t1_3.a > 5) AND (t1_3.a = 8))
-                     Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_3.a) AND leakproof(t1_3.a))
-                     ->  Bitmap Index Scan on t12_a_idx
-                           Index Cond: ((t1_3.a > 5) AND (t1_3.a = 8))
-               ->  Bitmap Heap Scan on public.t111 t1_4
+                     Filter: ((t1_3.a > 5) AND (t1_3.a = 8) AND leakproof(t1_3.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_3.a))
+               ->  Seq Scan on public.t111 t1_4
                      Output: t1_4.a, t1_4.tableoid, t1_4.ctid
-                     Recheck Cond: ((t1_4.a > 5) AND (t1_4.a = 8))
-                     Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_4.a) AND leakproof(t1_4.a))
-                     ->  Bitmap Index Scan on t111_a_idx
-                           Index Cond: ((t1_4.a > 5) AND (t1_4.a = 8))
-(38 rows)
+                     Filter: ((t1_4.a > 5) AND (t1_4.a = 8) AND leakproof(t1_4.a) AND EXISTS(SubPlan exists_1) AND snoop(t1_4.a))
+(26 rows)
 
 UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
 NOTICE:  snooped value: 8

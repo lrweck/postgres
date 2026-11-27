@@ -2604,14 +2604,12 @@ explain (costs off) select * from v_pagg_test order by y;
          Sort Key: pagg_test.y, (((unnest(regexp_split_to_array((string_agg((pagg_test.x)::text, ','::text)), ','::text))))::integer)
          ->  Result
                ->  ProjectSet
-                     ->  Finalize HashAggregate
+                     ->  HashAggregate
                            Group Key: pagg_test.y
                            ->  Gather
                                  Workers Planned: 2
-                                 ->  Partial HashAggregate
-                                       Group Key: pagg_test.y
-                                       ->  Parallel Seq Scan on pagg_test
-(13 rows)
+                                 ->  Parallel Seq Scan on pagg_test
+(11 rows)
 
 -- Ensure results are the same without parallel aggregation.
 set max_parallel_workers_per_gather = 0;

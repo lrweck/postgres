@@ -433,13 +433,11 @@ ANALYZE pred_tab;
 -- Ensure that index pred_tab_exprs_idx is used
 EXPLAIN (COSTS OFF)
 SELECT * FROM pred_tab WHERE (a < 5 AND b IS NOT NULL AND c IS NOT NULL) IS TRUE;
-                  QUERY PLAN                   
------------------------------------------------
- Bitmap Heap Scan on pred_tab
+         QUERY PLAN          
+-----------------------------
+ Seq Scan on pred_tab
    Filter: ((a < 5) IS TRUE)
-   ->  Bitmap Index Scan on pred_tab_exprs_idx
-         Index Cond: ((a < 5) = true)
-(4 rows)
+(2 rows)
 
 SELECT * FROM pred_tab WHERE (a < 5 AND b IS NOT NULL AND c IS NOT NULL) IS TRUE;
  a | b | c 

@@ -108,34 +108,34 @@ SELECT relname, d.* FROM d, pg_class where d.tableoid = pg_class.oid;
 SELECT relname, a.* FROM ONLY a, pg_class where a.tableoid = pg_class.oid;
  relname |    aa    
 ---------+----------
- a       | aaa
- a       | aaaa
- a       | aaaaa
- a       | aaaaaa
- a       | aaaaaaa
  a       | aaaaaaaa
+ a       | aaaaaaa
+ a       | aaaaaa
+ a       | aaaaa
+ a       | aaaa
+ a       | aaa
 (6 rows)
 
 SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
  relname |    aa    | bb 
 ---------+----------+----
- b       | bbb      | 
- b       | bbbb     | 
- b       | bbbbb    | 
- b       | bbbbbb   | 
- b       | bbbbbbb  | 
  b       | bbbbbbbb | 
+ b       | bbbbbbb  | 
+ b       | bbbbbb   | 
+ b       | bbbbb    | 
+ b       | bbbb     | 
+ b       | bbb      | 
 (6 rows)
 
 SELECT relname, c.* FROM ONLY c, pg_class where c.tableoid = pg_class.oid;
  relname |    aa    | cc 
 ---------+----------+----
- c       | ccc      | 
- c       | cccc     | 
- c       | ccccc    | 
- c       | cccccc   | 
- c       | ccccccc  | 
  c       | cccccccc | 
+ c       | ccccccc  | 
+ c       | cccccc   | 
+ c       | ccccc    | 
+ c       | cccc     | 
+ c       | ccc      | 
 (6 rows)
 
 SELECT relname, d.* FROM ONLY d, pg_class where d.tableoid = pg_class.oid;
@@ -231,34 +231,34 @@ SELECT relname, d.* FROM d, pg_class where d.tableoid = pg_class.oid;
 SELECT relname, a.* FROM ONLY a, pg_class where a.tableoid = pg_class.oid;
  relname |   aa   
 ---------+--------
- a       | zzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
  a       | zzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
+ a       | zzzz
 (6 rows)
 
 SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
  relname |    aa    | bb 
 ---------+----------+----
- b       | bbb      | 
- b       | bbbb     | 
- b       | bbbbb    | 
- b       | bbbbbb   | 
- b       | bbbbbbb  | 
  b       | bbbbbbbb | 
+ b       | bbbbbbb  | 
+ b       | bbbbbb   | 
+ b       | bbbbb    | 
+ b       | bbbb     | 
+ b       | bbb      | 
 (6 rows)
 
 SELECT relname, c.* FROM ONLY c, pg_class where c.tableoid = pg_class.oid;
  relname |    aa    | cc 
 ---------+----------+----
- c       | ccc      | 
- c       | cccc     | 
- c       | ccccc    | 
- c       | cccccc   | 
- c       | ccccccc  | 
  c       | cccccccc | 
+ c       | ccccccc  | 
+ c       | cccccc   | 
+ c       | ccccc    | 
+ c       | cccc     | 
+ c       | ccc      | 
 (6 rows)
 
 SELECT relname, d.* FROM ONLY d, pg_class where d.tableoid = pg_class.oid;
@@ -350,12 +350,12 @@ SELECT relname, d.* FROM d, pg_class where d.tableoid = pg_class.oid;
 SELECT relname, a.* FROM ONLY a, pg_class where a.tableoid = pg_class.oid;
  relname |   aa   
 ---------+--------
- a       | zzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
  a       | zzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
+ a       | zzzz
 (6 rows)
 
 SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
@@ -372,12 +372,12 @@ SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
 SELECT relname, c.* FROM ONLY c, pg_class where c.tableoid = pg_class.oid;
  relname |    aa    | cc 
 ---------+----------+----
- c       | ccc      | 
- c       | cccc     | 
- c       | ccccc    | 
- c       | cccccc   | 
- c       | ccccccc  | 
  c       | cccccccc | 
+ c       | ccccccc  | 
+ c       | cccccc   | 
+ c       | ccccc    | 
+ c       | cccc     | 
+ c       | ccc      | 
 (6 rows)
 
 SELECT relname, d.* FROM ONLY d, pg_class where d.tableoid = pg_class.oid;
@@ -1811,15 +1811,11 @@ select * from patest0 join (select f1 from int4_tbl limit 1) ss on id = f1;
                Recheck Cond: (id = int4_tbl.f1)
                ->  Bitmap Index Scan on patest0i
                      Index Cond: (id = int4_tbl.f1)
-         ->  Bitmap Heap Scan on patest1 patest0_2
-               Recheck Cond: (id = int4_tbl.f1)
-               ->  Bitmap Index Scan on patest1i
-                     Index Cond: (id = int4_tbl.f1)
-         ->  Bitmap Heap Scan on patest2 patest0_3
-               Recheck Cond: (id = int4_tbl.f1)
-               ->  Bitmap Index Scan on patest2i
-                     Index Cond: (id = int4_tbl.f1)
-(16 rows)
+         ->  Seq Scan on patest1 patest0_2
+               Filter: (id = int4_tbl.f1)
+         ->  Seq Scan on patest2 patest0_3
+               Filter: (id = int4_tbl.f1)
+(12 rows)
 
 select * from patest0 join (select f1 from int4_tbl limit 1) ss on id = f1;
  id | x | f1 
@@ -1842,13 +1838,11 @@ select * from patest0 join (select f1 from int4_tbl limit 1) ss on id = f1;
                Recheck Cond: (id = int4_tbl.f1)
                ->  Bitmap Index Scan on patest0i
                      Index Cond: (id = int4_tbl.f1)
-         ->  Bitmap Heap Scan on patest1 patest0_2
-               Recheck Cond: (id = int4_tbl.f1)
-               ->  Bitmap Index Scan on patest1i
-                     Index Cond: (id = int4_tbl.f1)
+         ->  Seq Scan on patest1 patest0_2
+               Filter: (id = int4_tbl.f1)
          ->  Seq Scan on patest2 patest0_3
                Filter: (int4_tbl.f1 = id)
-(14 rows)
+(12 rows)
 
 select * from patest0 join (select f1 from int4_tbl limit 1) ss on id = f1;
  id | x | f1 
@@ -2055,8 +2049,8 @@ explain (costs off)
 select t1.* from matest0 t1, matest0 t2
 where t1.b = t2.b and t2.c = t2.d
 order by t1.b limit 10;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Limit
    ->  Merge Join
          Merge Cond: (t1.b = t2.b)
@@ -2064,12 +2058,12 @@ order by t1.b limit 10;
                Sort Key: t1.b
                ->  Index Scan using matest0i on matest0 t1_1
                ->  Index Scan using matest1i on matest1 t1_2
-         ->  Materialize
-               ->  Merge Append
-                     Sort Key: t2.b
-                     ->  Index Scan using matest0i on matest0 t2_1
+         ->  Sort
+               Sort Key: t2.b
+               ->  Append
+                     ->  Seq Scan on matest0 t2_1
                            Filter: (c = d)
-                     ->  Index Scan using matest1i on matest1 t2_2
+                     ->  Seq Scan on matest1 t2_2
                            Filter: (c = d)
 (14 rows)
 
@@ -3780,14 +3774,16 @@ set enable_bitmapscan = 0;
 -- Ensure Append node can be used when the partition is ordered by some
 -- pathkeys which were deemed redundant.
 explain (costs off) select * from mcrparted where a = 10 order by a, abs(b), c;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Append
-   ->  Index Scan using mcrparted1_a_abs_b_c_idx on mcrparted1 mcrparted_1
-         Index Cond: (a = 10)
-   ->  Index Scan using mcrparted2_a_abs_b_c_idx on mcrparted2 mcrparted_2
-         Index Cond: (a = 10)
-(5 rows)
+                   QUERY PLAN                   
+------------------------------------------------
+ Sort
+   Sort Key: (abs(mcrparted.b)), mcrparted.c
+   ->  Append
+         ->  Seq Scan on mcrparted1 mcrparted_1
+               Filter: (a = 10)
+         ->  Seq Scan on mcrparted2 mcrparted_2
+               Filter: (a = 10)
+(7 rows)
 
 reset enable_bitmapscan;
 drop table mcrparted;

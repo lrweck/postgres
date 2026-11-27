@@ -748,20 +748,16 @@ order by t1.a, t2.a;
                Output: t3.a, t3.b
                ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t3
                      Output: t3.a, t3.b
-         ->  Memoize
+         ->  Bitmap Heap Scan on public.semijoin_unique_tbl t2
                Output: t2.a, t2.b
-               Cache Key: t3.b
-               Cache Mode: logical
-               ->  Bitmap Heap Scan on public.semijoin_unique_tbl t2
-                     Output: t2.a, t2.b
-                     Recheck Cond: (t2.a = t3.b)
-                     ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
-                           Index Cond: (t2.a = t3.b)
+               Recheck Cond: (t2.a = t3.b)
+               ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                     Index Cond: (t2.a = t3.b)
    ->  Materialize
          Output: t1.a, t1.b
          ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t1
                Output: t1.a, t1.b
-(22 rows)
+(18 rows)
 
 -- Ensure that we can unique-ify expressions more complex than plain Vars
 explain (verbose, costs off)
@@ -1756,16 +1752,13 @@ explain (verbose, costs off)
 select * from int4_tbl where
   (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
   (select ten from tenk1 b);
-                                                                                         QUERY PLAN                                                                                          
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
+                                                                                      QUERY PLAN                                                                                       
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Right Semi Join
    Output: int4_tbl.f1
    Hash Cond: (b.ten = CASE WHEN (ANY (int4_tbl.f1 = (hashed SubPlan any_1).col1)) THEN int4_tbl.f1 ELSE NULL::integer END)
-   ->  HashAggregate
-         Output: b.ten
-         Group Key: b.ten
-         ->  Seq Scan on public.tenk1 b
-               Output: b.unique1, b.unique2, b.two, b.four, b.ten, b.twenty, b.hundred, b.thousand, b.twothousand, b.fivethous, b.tenthous, b.odd, b.even, b.stringu1, b.stringu2, b.string4
+   ->  Seq Scan on public.tenk1 b
+         Output: b.unique1, b.unique2, b.two, b.four, b.ten, b.twenty, b.hundred, b.thousand, b.twothousand, b.fivethous, b.tenthous, b.odd, b.even, b.stringu1, b.stringu2, b.string4
    ->  Hash
          Output: int4_tbl.f1
          ->  Seq Scan on public.int4_tbl
@@ -1773,7 +1766,7 @@ select * from int4_tbl where
          SubPlan any_1
            ->  Seq Scan on public.tenk1 a
                  Output: a.unique1
-(15 rows)
+(12 rows)
 
 select * from int4_tbl where
   (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
@@ -3243,12 +3236,11 @@ WHERE c.odd = b.odd));
  Nested Loop Semi Join
    Join Filter: (ANY (a.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
-         ->  Seq Scan on tenk2 b
+   ->  Seq Scan on tenk2 b
    SubPlan any_1
      ->  Seq Scan on tenk2 c
            Filter: (odd = b.odd)
-(8 rows)
+(7 rows)
 
 -- we should only try to pull up the sublink into RHS of a left join
 -- but a.hundred is not available.
@@ -3260,12 +3252,11 @@ ON A.hundred in (SELECT c.hundred FROM tenk2 C WHERE c.odd = b.odd);
  Nested Loop Left Join
    Join Filter: (ANY (a.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
-         ->  Seq Scan on tenk2 b
+   ->  Seq Scan on tenk2 b
    SubPlan any_1
      ->  Seq Scan on tenk2 c
            Filter: (odd = b.odd)
-(8 rows)
+(7 rows)
 
 -- we should only try to pull up the sublink into RHS of a left join
 -- but a.odd is not available for this.
@@ -3277,12 +3268,11 @@ ON B.hundred in (SELECT c.hundred FROM tenk2 C WHERE c.odd = a.odd);
  Nested Loop Left Join
    Join Filter: (ANY (b.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
-         ->  Seq Scan on tenk2 b
+   ->  Seq Scan on tenk2 b
    SubPlan any_1
      ->  Seq Scan on tenk2 c
            Filter: (odd = a.odd)
-(8 rows)
+(7 rows)
 
 -- should be able to pull up since all the references are available.
 explain (costs off)
@@ -3388,15 +3378,13 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM onek
     WHERE unique1 IN (VALUES(10000), (2), (389), (1000), (2000), (10029))
     ORDER BY unique1;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Sort
    Sort Key: unique1
-   ->  Bitmap Heap Scan on onek
-         Recheck Cond: (unique1 = ANY ('{10000,2,389,1000,2000,10029}'::integer[]))
-         ->  Bitmap Index Scan on onek_unique1
-               Index Cond: (unique1 = ANY ('{10000,2,389,1000,2000,10029}'::integer[]))
-(6 rows)
+   ->  Seq Scan on onek
+         Filter: (unique1 = ANY ('{10000,2,389,1000,2000,10029}'::integer[]))
+(4 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM onek
@@ -3458,14 +3446,14 @@ SELECT * from onek WHERE unique1 in (VALUES(1200::bigint), (1));
 EXPLAIN (COSTS OFF)
 SELECT c.unique1,c.ten FROM tenk1 c JOIN onek a USING (ten)
 WHERE a.ten IN (VALUES (1), (2));
-                    QUERY PLAN                    
---------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Hash Join
-   Hash Cond: (a.ten = c.ten)
-   ->  Seq Scan on onek a
-         Filter: (ten = ANY ('{1,2}'::integer[]))
+   Hash Cond: (c.ten = a.ten)
+   ->  Seq Scan on tenk1 c
    ->  Hash
-         ->  Seq Scan on tenk1 c
+         ->  Seq Scan on onek a
+               Filter: (ten = ANY ('{1,2}'::integer[]))
 (6 rows)
 
 EXPLAIN (COSTS OFF)
@@ -3755,17 +3743,17 @@ WHERE id NOT IN (
     FROM not_null_tab t1
     LEFT JOIN not_null_tab t2 ON t1.id = t2.id
 );
-                     QUERY PLAN                      
------------------------------------------------------
- Hash Anti Join
-   Hash Cond: (not_null_tab.id = t1.id)
-   ->  Seq Scan on not_null_tab
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t1.id = not_null_tab.id)
+   ->  Hash Left Join
+         Hash Cond: (t1.id = t2.id)
+         ->  Seq Scan on not_null_tab t1
+         ->  Hash
+               ->  Seq Scan on not_null_tab t2
    ->  Hash
-         ->  Hash Left Join
-               Hash Cond: (t1.id = t2.id)
-               ->  Seq Scan on not_null_tab t1
-               ->  Hash
-                     ->  Seq Scan on not_null_tab t2
+         ->  Seq Scan on not_null_tab
 (9 rows)
 
 -- No ANTI JOIN: inner side is defined NOT NULL but is nulled by outer join
@@ -3798,17 +3786,17 @@ WHERE id NOT IN (
     LEFT JOIN not_null_tab t2 ON t1.id = t2.id
     WHERE t2.id IS NOT NULL
 );
-                     QUERY PLAN                      
------------------------------------------------------
- Hash Anti Join
-   Hash Cond: (not_null_tab.id = t2.id)
-   ->  Seq Scan on not_null_tab
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t2.id = not_null_tab.id)
+   ->  Hash Join
+         Hash Cond: (t1.id = t2.id)
+         ->  Seq Scan on not_null_tab t1
+         ->  Hash
+               ->  Seq Scan on not_null_tab t2
    ->  Hash
-         ->  Hash Join
-               Hash Cond: (t1.id = t2.id)
-               ->  Seq Scan on not_null_tab t1
-               ->  Hash
-                     ->  Seq Scan on not_null_tab t2
+         ->  Seq Scan on not_null_tab
 (9 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL, inner side is forced nonnullable
@@ -3821,18 +3809,18 @@ WHERE id NOT IN (
     LEFT JOIN null_tab t2 ON t1.id = t2.id
     WHERE t1.id IS NOT NULL
 );
-                   QUERY PLAN                    
--------------------------------------------------
- Hash Anti Join
-   Hash Cond: (not_null_tab.id = t1.id)
-   ->  Seq Scan on not_null_tab
-   ->  Hash
-         ->  Hash Left Join
-               Hash Cond: (t1.id = t2.id)
+                  QUERY PLAN                  
+----------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t1.id = not_null_tab.id)
+   ->  Hash Right Join
+         Hash Cond: (t2.id = t1.id)
+         ->  Seq Scan on null_tab t2
+         ->  Hash
                ->  Seq Scan on null_tab t1
                      Filter: (id IS NOT NULL)
-               ->  Hash
-                     ->  Seq Scan on null_tab t2
+   ->  Hash
+         ->  Seq Scan on not_null_tab
 (10 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL, inner side is forced nonnullable
@@ -3934,17 +3922,14 @@ ON t2.id NOT IN (SELECT id FROM not_null_tab);
 EXPLAIN (COSTS OFF)
 SELECT * FROM not_null_tab
 WHERE (id, val) NOT IN (SELECT id, val FROM not_null_tab);
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
- Merge Anti Join
-   Merge Cond: ((not_null_tab.id = not_null_tab_1.id) AND (not_null_tab.val = not_null_tab_1.val))
-   ->  Sort
-         Sort Key: not_null_tab.id, not_null_tab.val
-         ->  Seq Scan on not_null_tab
-   ->  Sort
-         Sort Key: not_null_tab_1.id, not_null_tab_1.val
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Hash Anti Join
+   Hash Cond: ((not_null_tab.id = not_null_tab_1.id) AND (not_null_tab.val = not_null_tab_1.val))
+   ->  Seq Scan on not_null_tab
+   ->  Hash
          ->  Seq Scan on not_null_tab not_null_tab_1
-(8 rows)
+(5 rows)
 
 -- ANTI JOIN: both sides are defined NOT NULL
 EXPLAIN (COSTS OFF)

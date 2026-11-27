@@ -1749,8 +1749,8 @@ SELECT t3.y, sum(t2.y + t3.y), count(*)
   JOIN eager_agg_tab_ml t2 ON t1.x = t2.x
   JOIN eager_agg_tab_ml t3 ON t2.x = t3.x
 GROUP BY t3.y ORDER BY t3.y;
-                                                 QUERY PLAN                                                 
-------------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Sort
    Output: t3.y, (sum((t2.y + t3.y))), (count(*))
    Sort Key: t3.y
@@ -1798,61 +1798,61 @@ GROUP BY t3.y ORDER BY t3.y;
                                  Output: t1_1.x
                ->  Hash Join
                      Output: t3_2.y, (PARTIAL sum((t2_2.y + t3_2.y))), (PARTIAL count(*))
-                     Hash Cond: (t2_2.x = t1_2.x)
-                     ->  Partial HashAggregate
-                           Output: t2_2.x, t3_2.y, t3_2.x, PARTIAL sum((t2_2.y + t3_2.y)), PARTIAL count(*)
-                           Group Key: t2_2.x, t3_2.y, t3_2.x
-                           ->  Hash Join
-                                 Output: t2_2.y, t2_2.x, t3_2.y, t3_2.x
-                                 Hash Cond: (t2_2.x = t3_2.x)
-                                 ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t2_2
-                                       Output: t2_2.y, t2_2.x
-                                 ->  Hash
-                                       Output: t3_2.y, t3_2.x
-                                       ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t3_2
-                                             Output: t3_2.y, t3_2.x
-                     ->  Hash
+                     Hash Cond: (t1_2.x = t2_2.x)
+                     ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t1_2
                            Output: t1_2.x
-                           ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t1_2
-                                 Output: t1_2.x
+                     ->  Hash
+                           Output: t2_2.x, t3_2.y, t3_2.x, (PARTIAL sum((t2_2.y + t3_2.y))), (PARTIAL count(*))
+                           ->  Partial HashAggregate
+                                 Output: t2_2.x, t3_2.y, t3_2.x, PARTIAL sum((t2_2.y + t3_2.y)), PARTIAL count(*)
+                                 Group Key: t2_2.x, t3_2.y, t3_2.x
+                                 ->  Hash Join
+                                       Output: t2_2.y, t2_2.x, t3_2.y, t3_2.x
+                                       Hash Cond: (t2_2.x = t3_2.x)
+                                       ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t2_2
+                                             Output: t2_2.y, t2_2.x
+                                       ->  Hash
+                                             Output: t3_2.y, t3_2.x
+                                             ->  Seq Scan on public.eager_agg_tab_ml_p2_s2 t3_2
+                                                   Output: t3_2.y, t3_2.x
                ->  Hash Join
                      Output: t3_3.y, (PARTIAL sum((t2_3.y + t3_3.y))), (PARTIAL count(*))
-                     Hash Cond: (t2_3.x = t1_3.x)
-                     ->  Partial HashAggregate
-                           Output: t2_3.x, t3_3.y, t3_3.x, PARTIAL sum((t2_3.y + t3_3.y)), PARTIAL count(*)
-                           Group Key: t2_3.x, t3_3.y, t3_3.x
-                           ->  Hash Join
-                                 Output: t2_3.y, t2_3.x, t3_3.y, t3_3.x
-                                 Hash Cond: (t2_3.x = t3_3.x)
-                                 ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t2_3
-                                       Output: t2_3.y, t2_3.x
-                                 ->  Hash
-                                       Output: t3_3.y, t3_3.x
-                                       ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t3_3
-                                             Output: t3_3.y, t3_3.x
-                     ->  Hash
+                     Hash Cond: (t1_3.x = t2_3.x)
+                     ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t1_3
                            Output: t1_3.x
-                           ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t1_3
-                                 Output: t1_3.x
+                     ->  Hash
+                           Output: t2_3.x, t3_3.y, t3_3.x, (PARTIAL sum((t2_3.y + t3_3.y))), (PARTIAL count(*))
+                           ->  Partial HashAggregate
+                                 Output: t2_3.x, t3_3.y, t3_3.x, PARTIAL sum((t2_3.y + t3_3.y)), PARTIAL count(*)
+                                 Group Key: t2_3.x, t3_3.y, t3_3.x
+                                 ->  Hash Join
+                                       Output: t2_3.y, t2_3.x, t3_3.y, t3_3.x
+                                       Hash Cond: (t2_3.x = t3_3.x)
+                                       ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t2_3
+                                             Output: t2_3.y, t2_3.x
+                                       ->  Hash
+                                             Output: t3_3.y, t3_3.x
+                                             ->  Seq Scan on public.eager_agg_tab_ml_p3_s1 t3_3
+                                                   Output: t3_3.y, t3_3.x
                ->  Hash Join
                      Output: t3_4.y, (PARTIAL sum((t2_4.y + t3_4.y))), (PARTIAL count(*))
-                     Hash Cond: (t2_4.x = t1_4.x)
-                     ->  Partial HashAggregate
-                           Output: t2_4.x, t3_4.y, t3_4.x, PARTIAL sum((t2_4.y + t3_4.y)), PARTIAL count(*)
-                           Group Key: t2_4.x, t3_4.y, t3_4.x
-                           ->  Hash Join
-                                 Output: t2_4.y, t2_4.x, t3_4.y, t3_4.x
-                                 Hash Cond: (t2_4.x = t3_4.x)
-                                 ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t2_4
-                                       Output: t2_4.y, t2_4.x
-                                 ->  Hash
-                                       Output: t3_4.y, t3_4.x
-                                       ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t3_4
-                                             Output: t3_4.y, t3_4.x
-                     ->  Hash
+                     Hash Cond: (t1_4.x = t2_4.x)
+                     ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t1_4
                            Output: t1_4.x
-                           ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t1_4
-                                 Output: t1_4.x
+                     ->  Hash
+                           Output: t2_4.x, t3_4.y, t3_4.x, (PARTIAL sum((t2_4.y + t3_4.y))), (PARTIAL count(*))
+                           ->  Partial HashAggregate
+                                 Output: t2_4.x, t3_4.y, t3_4.x, PARTIAL sum((t2_4.y + t3_4.y)), PARTIAL count(*)
+                                 Group Key: t2_4.x, t3_4.y, t3_4.x
+                                 ->  Hash Join
+                                       Output: t2_4.y, t2_4.x, t3_4.y, t3_4.x
+                                       Hash Cond: (t2_4.x = t3_4.x)
+                                       ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t2_4
+                                             Output: t2_4.y, t2_4.x
+                                       ->  Hash
+                                             Output: t3_4.y, t3_4.x
+                                             ->  Seq Scan on public.eager_agg_tab_ml_p3_s2 t3_4
+                                                   Output: t3_4.y, t3_4.x
 (102 rows)
 
 SELECT t3.y, sum(t2.y + t3.y), count(*)
