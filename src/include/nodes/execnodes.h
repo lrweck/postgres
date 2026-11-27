@@ -1050,6 +1050,22 @@ typedef struct SubPlanState
 	ExprState  *lhs_hash_expr;	/* hash expr for lefthand datatype(s) */
 	FmgrInfo   *cur_eq_funcs;	/* equality functions for LHS vs. table */
 	ExprState  *cur_eq_comp;	/* equality comparator for LHS vs. table */
+	/* cache of correlated subplan results, keyed by parameter values */
+	bool		cacheEnabled;	/* true if this subplan is cacheable */
+	MemoryContext cacheCxt;		/* context holding the cached entries */
+	List	  **cacheBuckets;	/* hash buckets of SubPlanCacheEntry */
+	int			cacheNBuckets;	/* number of buckets */
+	List	   *cacheAll;		/* all entries, for LRU eviction */
+	Size		cacheMem;		/* bytes currently charged to the cache */
+	Size		cacheMemLimit;	/* cache memory limit (a quarter of work_mem) */
+	uint64		cacheLru;		/* LRU clock */
+	int			cacheNParams;	/* length of the parameter list */
+	FmgrInfo   *cacheEqFuncs;	/* equality function per parameter */
+	Oid		   *cacheCollations;	/* collation per parameter */
+	int16	   *cacheTypLens;	/* typlen per parameter */
+	bool	   *cacheTypByVals; /* typbyval per parameter */
+	int16		cacheResTypLen; /* typlen of the result */
+	bool		cacheResTypByVal;	/* typbyval of the result */
 } SubPlanState;
 
 /*
