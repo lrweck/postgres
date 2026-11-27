@@ -156,6 +156,7 @@ extern PGDLLIMPORT bool enable_groupagg;
 extern PGDLLIMPORT bool enable_nestloop;
 extern PGDLLIMPORT bool enable_material;
 extern PGDLLIMPORT bool enable_memoize;
+extern PGDLLIMPORT bool enable_subplan_cache;
 extern PGDLLIMPORT bool enable_mergejoin;
 extern PGDLLIMPORT bool enable_hashjoin;
 

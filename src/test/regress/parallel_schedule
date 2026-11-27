@@ -152,6 +152,10 @@ test: fast_default
 # itself
 test: sort_cost
 
+# exercises the correlated subplan result cache; runs alone because it
+# toggles a GUC and creates a sequence
+test: subplan_cache
+
 # run tablespace test at the end because it drops the tablespace created during
 # setup that other tests may use.
 test: tablespace

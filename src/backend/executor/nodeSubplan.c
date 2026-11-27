@@ -30,11 +30,19 @@
 #include "executor/executor.h"
 #include "executor/nodeSubplan.h"
 #include "miscadmin.h"
+#include "common/hashfn.h"
+#include "optimizer/optimizer.h"
+#include "utils/datum.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/array.h"
 #include "utils/lsyscache.h"
+#include "utils/typcache.h"
 #include "utils/memutils.h"
+
+
+/* GUC: enable caching of correlated subplan results */
+bool		enable_subplan_cache = true;
 
 static Datum ExecHashSubPlan(SubPlanState *node,
 							 ExprContext *econtext,
@@ -48,6 +56,301 @@ static bool findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot,
 static bool slotAllNulls(TupleTableSlot *slot);
 static bool slotNoNulls(TupleTableSlot *slot);
 
+
+
+/*
+ * Cache of correlated subplan results.
+ *
+ * A correlated EXPR_SUBLINK or EXISTS_SUBLINK is re-executed once per outer
+ * row, even when it depends on only a handful of distinct parameter values.
+ * Cache the result by parameter value for the duration of the query.  The
+ * cache is bounded by a quarter of work_mem and evicts the least recently used
+ * entry.  Subplans that contain volatile functions are never cached, since
+ * their result is not a function of the parameters.
+ */
+#define SUBPLAN_CACHE_BUCKETS 64
+#define SUBPLAN_CACHE_MAX_ENTRIES 4096
+
+typedef struct SubPlanCacheEntry
+{
+	uint32		hash;			/* hash of the parameter values */
+	int			bucket;			/* bucket this entry is linked into */
+	int			nparams;
+	Datum	   *values;			/* copied parameter values */
+	bool	   *nulls;
+	Datum		result;
+	bool		resultIsNull;
+	uint64		lru;			/* LRU clock value of last use */
+	Size		mem;			/* bytes charged to the cache limit */
+} SubPlanCacheEntry;
+
+/*
+ * plan_contains_volatile_functions
+ *		True if the plan tree contains a volatile function anywhere that we
+ *		know how to look.
+ */
+static bool
+plan_contains_volatile_functions(Plan *plan)
+{
+	if (plan == NULL)
+		return false;
+
+	if (contain_volatile_functions((Node *) plan->targetlist) ||
+		contain_volatile_functions((Node *) plan->qual))
+		return true;
+
+	switch (nodeTag(plan))
+	{
+		case T_NestLoop:
+		case T_HashJoin:
+		case T_MergeJoin:
+			if (contain_volatile_functions((Node *) ((Join *) plan)->joinqual))
+				return true;
+			if (IsA(plan, HashJoin) &&
+				contain_volatile_functions((Node *) ((HashJoin *) plan)->hashclauses))
+				return true;
+			if (IsA(plan, MergeJoin) &&
+				contain_volatile_functions((Node *) ((MergeJoin *) plan)->mergeclauses))
+				return true;
+			break;
+		case T_IndexScan:
+			if (contain_volatile_functions((Node *) ((IndexScan *) plan)->indexqual) ||
+				contain_volatile_functions((Node *) ((IndexScan *) plan)->indexqualorig))
+				return true;
+			break;
+		case T_IndexOnlyScan:
+			if (contain_volatile_functions((Node *) ((IndexOnlyScan *) plan)->indexqual))
+				return true;
+			break;
+		case T_Result:
+			if (contain_volatile_functions((Node *) ((Result *) plan)->resconstantqual))
+				return true;
+			break;
+		case T_ValuesScan:
+			if (contain_volatile_functions((Node *) ((ValuesScan *) plan)->values_lists))
+				return true;
+			break;
+		case T_FunctionScan:
+			{
+				ListCell   *lc2;
+
+				foreach(lc2, ((FunctionScan *) plan)->functions)
+				{
+					RangeTblFunction *rtfunc = lfirst_node(RangeTblFunction, lc2);
+
+					if (contain_volatile_functions((Node *) rtfunc->funcexpr))
+						return true;
+				}
+			}
+			break;
+		default:
+			break;
+	}
+
+	if (plan_contains_volatile_functions(plan->lefttree) ||
+		plan_contains_volatile_functions(plan->righttree))
+		return true;
+
+	/*
+	 * We cannot see the plan trees of initplans from here; treat their
+	 * presence as a reason not to cache.
+	 */
+	if (plan->initPlan != NIL)
+		return true;
+
+	return false;
+}
+
+static bool
+subplan_cacheable(SubPlan *subplan)
+{
+	return (subplan->subLinkType == EXPR_SUBLINK ||
+			subplan->subLinkType == EXISTS_SUBLINK) &&
+		subplan->parParam != NIL &&
+		!subplan->useHashTable &&
+		subplan->setParam == NIL;
+}
+
+static uint32
+subplan_params_hash(SubPlanState *node, ExprContext *econtext)
+{
+	SubPlan    *subplan = node->subplan;
+	ListCell   *l;
+	uint32		h = 0;
+	int			i = 0;
+
+	foreach(l, subplan->parParam)
+	{
+		int			paramid = lfirst_int(l);
+		ParamExecData *prm = &econtext->ecxt_param_exec_vals[paramid];
+		uint32		ph;
+
+		if (prm->isnull)
+			ph = 0x9e3779b9;
+		else if (node->cacheTypByVals[i])
+			ph = hash_uint32((uint32) prm->value);
+		else
+		{
+			struct varlena *v = PG_DETOAST_DATUM_PACKED(prm->value);
+
+			ph = hash_any((unsigned char *) VARDATA_ANY(v),
+						  VARSIZE_ANY_EXHDR(v));
+		}
+		h = h * 31 + ph;
+		i++;
+	}
+	return h;
+}
+
+static bool
+subplan_params_equal(SubPlanState *node, ExprContext *econtext,
+					 SubPlanCacheEntry *e)
+{
+	SubPlan    *subplan = node->subplan;
+	ListCell   *l;
+	int			i = 0;
+
+	foreach(l, subplan->parParam)
+	{
+		int			paramid = lfirst_int(l);
+		ParamExecData *prm = &econtext->ecxt_param_exec_vals[paramid];
+
+		if (prm->isnull != e->nulls[i])
+			return false;
+		if (!prm->isnull)
+		{
+			if (!DatumGetBool(FunctionCall2Coll(&node->cacheEqFuncs[i],
+												node->cacheCollations[i],
+												prm->value, e->values[i])))
+				return false;
+		}
+		i++;
+	}
+	return true;
+}
+
+static SubPlanCacheEntry *
+subplan_cache_lookup(SubPlanState *node, ExprContext *econtext)
+{
+	uint32		h = subplan_params_hash(node, econtext);
+	ListCell   *lc;
+
+	foreach(lc, node->cacheBuckets[h % node->cacheNBuckets])
+	{
+		SubPlanCacheEntry *e = (SubPlanCacheEntry *) lfirst(lc);
+
+		if (e->hash == h && subplan_params_equal(node, econtext, e))
+		{
+			e->lru = ++node->cacheLru;
+			return e;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * Evict the least recently used entry.  Its copied datums live in cacheCxt,
+ * so they must be freed here for the memory limit to mean anything.
+ */
+static void
+subplan_cache_evict_one(SubPlanState *node)
+{
+	SubPlanCacheEntry *victim = NULL;
+	ListCell   *lc;
+	int			i;
+
+	foreach(lc, node->cacheAll)
+	{
+		SubPlanCacheEntry *e = (SubPlanCacheEntry *) lfirst(lc);
+
+		if (victim == NULL || e->lru < victim->lru)
+			victim = e;
+	}
+	if (victim == NULL)
+		return;
+
+	for (i = 0; i < victim->nparams; i++)
+	{
+		if (!victim->nulls[i] && !node->cacheTypByVals[i])
+			pfree(DatumGetPointer(victim->values[i]));
+	}
+	if (!victim->resultIsNull && !node->cacheResTypByVal)
+		pfree(DatumGetPointer(victim->result));
+
+	pfree(victim->values);
+	pfree(victim->nulls);
+
+	node->cacheAll = list_delete_ptr(node->cacheAll, victim);
+	node->cacheBuckets[victim->bucket] =
+		list_delete_ptr(node->cacheBuckets[victim->bucket], victim);
+	node->cacheMem -= victim->mem;
+	pfree(victim);
+}
+
+static void
+subplan_cache_store(SubPlanState *node, ExprContext *econtext,
+					Datum result, bool resultIsNull)
+{
+	SubPlan    *subplan = node->subplan;
+	SubPlanCacheEntry *e;
+	MemoryContext oldcxt;
+	ListCell   *l;
+	uint32		h;
+	int			i = 0;
+	Size		mem = sizeof(SubPlanCacheEntry) + 64;
+
+	if (!node->cacheEnabled)
+		return;
+
+	while (list_length(node->cacheAll) >= SUBPLAN_CACHE_MAX_ENTRIES ||
+		   node->cacheMem > node->cacheMemLimit)
+	{
+		if (node->cacheAll == NIL)
+			break;
+		subplan_cache_evict_one(node);
+	}
+
+	h = subplan_params_hash(node, econtext);
+
+	oldcxt = MemoryContextSwitchTo(node->cacheCxt);
+	e = (SubPlanCacheEntry *) palloc0(sizeof(SubPlanCacheEntry));
+	e->nparams = node->cacheNParams;
+	e->values = (Datum *) palloc(sizeof(Datum) * e->nparams);
+	e->nulls = (bool *) palloc(sizeof(bool) * e->nparams);
+	e->hash = h;
+	e->bucket = h % node->cacheNBuckets;
+
+	foreach(l, subplan->parParam)
+	{
+		int			paramid = lfirst_int(l);
+		ParamExecData *prm = &econtext->ecxt_param_exec_vals[paramid];
+
+		e->nulls[i] = prm->isnull;
+		e->values[i] = prm->isnull ? (Datum) 0 :
+			datumCopy(prm->value, node->cacheTypByVals[i], node->cacheTypLens[i]);
+		mem += sizeof(Datum) + sizeof(bool);
+		if (!prm->isnull && !node->cacheTypByVals[i])
+			mem += datumGetSize(prm->value, false, node->cacheTypLens[i]);
+		i++;
+	}
+
+	e->resultIsNull = resultIsNull;
+	e->result = resultIsNull ? (Datum) 0 :
+		datumCopy(result, node->cacheResTypByVal, node->cacheResTypLen);
+	if (!resultIsNull && !node->cacheResTypByVal)
+		mem += datumGetSize(result, false, node->cacheResTypLen);
+
+	e->mem = mem;
+	e->lru = ++node->cacheLru;
+	node->cacheMem += mem;
+
+	node->cacheAll = lappend(node->cacheAll, e);
+	node->cacheBuckets[e->bucket] = lappend(node->cacheBuckets[e->bucket], e);
+	MemoryContextSwitchTo(oldcxt);
+
+	while (node->cacheMem > node->cacheMemLimit && node->cacheAll != NIL)
+		subplan_cache_evict_one(node);
+}
 
 /* ----------------------------------------------------------------
  *		ExecSubPlan
@@ -79,11 +382,26 @@ ExecSubPlan(SubPlanState *node,
 	/* Force forward-scan mode for evaluation */
 	estate->es_direction = ForwardScanDirection;
 
+	if (node->cacheEnabled)
+	{
+		SubPlanCacheEntry *e = subplan_cache_lookup(node, econtext);
+
+		if (e != NULL)
+		{
+			estate->es_direction = dir;
+			*isNull = e->resultIsNull;
+			return e->result;
+		}
+	}
+
 	/* Select appropriate evaluation strategy */
 	if (subplan->useHashTable)
 		retval = ExecHashSubPlan(node, econtext, isNull);
 	else
 		retval = ExecScanSubPlan(node, econtext, isNull);
+
+	if (node->cacheEnabled)
+		subplan_cache_store(node, econtext, retval, *isNull);
 
 	/* restore scan direction */
 	estate->es_direction = dir;
@@ -876,6 +1194,68 @@ ExecInitSubPlan(SubPlan *subplan, PlanState *parent)
 	 * initialize my state
 	 */
 	sstate->curTuple = NULL;
+	/* cache of correlated subplan results */
+	sstate->cacheEnabled = false;
+	sstate->cacheAll = NIL;
+	sstate->cacheMem = 0;
+	sstate->cacheLru = 0;
+	sstate->cacheNBuckets = SUBPLAN_CACHE_BUCKETS;
+	sstate->cacheBuckets = NULL;
+	sstate->cacheEqFuncs = NULL;
+	sstate->cacheCollations = NULL;
+	sstate->cacheTypLens = NULL;
+	sstate->cacheTypByVals = NULL;
+
+	if (enable_subplan_cache && subplan_cacheable(subplan) &&
+		sstate->planstate != NULL &&
+		!plan_contains_volatile_functions(sstate->planstate->plan))
+	{
+		ListCell   *lc;
+		int			i = 0;
+		bool		ok = true;
+		Oid			restype;
+
+		sstate->cacheNParams = list_length(subplan->args);
+		sstate->cacheEqFuncs = palloc(sizeof(FmgrInfo) * sstate->cacheNParams);
+		sstate->cacheCollations = palloc(sizeof(Oid) * sstate->cacheNParams);
+		sstate->cacheTypLens = palloc(sizeof(int16) * sstate->cacheNParams);
+		sstate->cacheTypByVals = palloc(sizeof(bool) * sstate->cacheNParams);
+
+		foreach(lc, subplan->args)
+		{
+			Expr	   *arg = (Expr *) lfirst(lc);
+			Oid			typid = exprType((Node *) arg);
+			TypeCacheEntry *tc;
+
+			tc = lookup_type_cache(typid,
+								   TYPECACHE_EQ_OPR | TYPECACHE_EQ_OPR_FINFO);
+			if (!OidIsValid(tc->eq_opr))
+			{
+				ok = false;
+				break;
+			}
+			sstate->cacheEqFuncs[i] = tc->eq_opr_finfo;
+			sstate->cacheCollations[i] = exprCollation((Node *) arg);
+			get_typlenbyval(typid, &sstate->cacheTypLens[i],
+							&sstate->cacheTypByVals[i]);
+			i++;
+		}
+
+		if (ok)
+		{
+			restype = (subplan->subLinkType == EXISTS_SUBLINK) ?
+				BOOLOID : subplan->firstColType;
+			get_typlenbyval(restype, &sstate->cacheResTypLen,
+							&sstate->cacheResTypByVal);
+			sstate->cacheCxt = AllocSetContextCreate(estate->es_query_cxt,
+													 "SubPlan cache",
+													 ALLOCSET_SMALL_SIZES);
+			sstate->cacheBuckets = palloc0(sizeof(List *) * sstate->cacheNBuckets);
+			sstate->cacheMemLimit = ((Size) work_mem * 1024L) / 4;
+			sstate->cacheEnabled = true;
+		}
+	}
+
 	sstate->curArray = PointerGetDatum(NULL);
 	sstate->projLeft = NULL;
 	sstate->projRight = NULL;
