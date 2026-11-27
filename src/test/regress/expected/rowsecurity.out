@@ -502,13 +502,15 @@ NOTICE:  f_leak => awesome science fiction
 -- a rel with RLS quals can still be removed by outer-join removal
 EXPLAIN (COSTS OFF)
 SELECT c.cid FROM category c LEFT JOIN document d ON c.cid = d.did;
-                     QUERY PLAN                     
-----------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Seq Scan on category c
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
-(4 rows)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
+(6 rows)
 
 -- viewpoint from regress_rls_carol
 SET SESSION AUTHORIZATION regress_rls_carol;
@@ -585,9 +587,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
  Seq Scan on document
    Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
-(5 rows)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
+(7 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
                                   QUERY PLAN                                   
@@ -595,13 +599,15 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
  Hash Join
    Hash Cond: (category.cid = document.cid)
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
    ->  Seq Scan on category
    ->  Hash
          ->  Seq Scan on document
                Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
-(9 rows)
+(11 rows)
 
 -- viewpoint from regress_rls_dave
 SET SESSION AUTHORIZATION regress_rls_dave;
@@ -649,9 +655,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
  Seq Scan on document
    Filter: ((cid <> 44) AND (cid <> 44) AND (cid < 50) AND (dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
-(5 rows)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
+(7 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
                                                           QUERY PLAN                                                          
@@ -659,13 +667,15 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
  Hash Join
    Hash Cond: (category.cid = document.cid)
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
    ->  Seq Scan on category
    ->  Hash
          ->  Seq Scan on document
                Filter: ((cid <> 44) AND (cid <> 44) AND (cid < 50) AND (dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
-(9 rows)
+(11 rows)
 
 -- 44 would technically fail for both p2r and p1r, but we should get an error
 -- back from p1r for this because it sorts first
@@ -750,9 +760,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
  Nested Loop
    ->  Seq Scan on document
          Filter: ((dauthor = CURRENT_USER) AND f_leak(dtitle))
-   ->  Index Scan using category_pkey on category
-         Index Cond: (cid = document.cid)
-(5 rows)
+   ->  Bitmap Heap Scan on category
+         Recheck Cond: (cid = document.cid)
+         ->  Bitmap Index Scan on category_pkey
+               Index Cond: (cid = document.cid)
+(7 rows)
 
 -- interaction of FK/PK constraints
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -1312,15 +1324,17 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
 -------------------------------------------------------------------------
  Append
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
    ->  Seq Scan on part_document_fiction part_document_1
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    ->  Seq Scan on part_document_satire part_document_2
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    ->  Seq Scan on part_document_nonfiction part_document_3
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
-(10 rows)
+(12 rows)
 
 -- viewpoint from regress_rls_carol
 SET SESSION AUTHORIZATION regress_rls_carol;
@@ -1365,15 +1379,17 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
 -------------------------------------------------------------------------
  Append
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
    ->  Seq Scan on part_document_fiction part_document_1
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    ->  Seq Scan on part_document_satire part_document_2
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    ->  Seq Scan on part_document_nonfiction part_document_3
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
-(10 rows)
+(12 rows)
 
 -- viewpoint from regress_rls_dave
 SET SESSION AUTHORIZATION regress_rls_dave;
@@ -1401,9 +1417,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
  Seq Scan on part_document_fiction part_document
    Filter: ((cid < 55) AND (dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
-(5 rows)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
+(7 rows)
 
 -- pp1 ERROR
 INSERT INTO part_document VALUES (100, 11, 5, 'regress_rls_dave', 'testing pp1'); -- fail
@@ -1479,9 +1497,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
  Seq Scan on part_document_fiction part_document
    Filter: ((cid < 55) AND (dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
-(5 rows)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
+(7 rows)
 
 -- viewpoint from regress_rls_carol
 SET SESSION AUTHORIZATION regress_rls_carol;
@@ -1517,15 +1537,17 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
 -------------------------------------------------------------------------
  Append
    InitPlan expr_1
-     ->  Index Scan using uaccount_pkey on uaccount
-           Index Cond: (pguser = CURRENT_USER)
+     ->  Bitmap Heap Scan on uaccount
+           Recheck Cond: (pguser = CURRENT_USER)
+           ->  Bitmap Index Scan on uaccount_pkey
+                 Index Cond: (pguser = CURRENT_USER)
    ->  Seq Scan on part_document_fiction part_document_1
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    ->  Seq Scan on part_document_satire part_document_2
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
    ->  Seq Scan on part_document_nonfiction part_document_3
          Filter: ((dlevel <= (InitPlan expr_1).col1) AND f_leak(dtitle))
-(10 rows)
+(12 rows)
 
 -- only owner can change policies
 ALTER POLICY pp1 ON part_document USING (true);    --fail
@@ -2826,9 +2848,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
      ->  Seq Scan on z1
            Filter: (((a % 2) = 0) AND f_leak(b))
    ->  CTE Scan on q
-   ->  Materialize
-         ->  Seq Scan on z2
-(7 rows)
+   ->  Seq Scan on z2
+(6 rows)
 
 PREPARE plancache_test3 AS WITH q AS MATERIALIZED (SELECT * FROM z2) SELECT * FROM q,z1 WHERE f_leak(z1.b);
 EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
@@ -2875,9 +2896,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
      ->  Seq Scan on z1
            Filter: (((a % 2) = 0) AND f_leak(b))
    ->  CTE Scan on q
-   ->  Materialize
-         ->  Seq Scan on z2
-(7 rows)
+   ->  Seq Scan on z2
+(6 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
                      QUERY PLAN                      
@@ -2923,9 +2943,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
      ->  Seq Scan on z1
            Filter: (((a % 2) = 1) AND f_leak(b))
    ->  CTE Scan on q
-   ->  Materialize
-         ->  Seq Scan on z2
-(7 rows)
+   ->  Seq Scan on z2
+(6 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
                      QUERY PLAN                      
@@ -2971,9 +2990,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
      ->  Seq Scan on z1
            Filter: (((a % 2) = 1) AND f_leak(b))
    ->  CTE Scan on q
-   ->  Materialize
-         ->  Seq Scan on z2
-(7 rows)
+   ->  Seq Scan on z2
+(6 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
                      QUERY PLAN                      

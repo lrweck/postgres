@@ -494,27 +494,31 @@ CREATE VIEW atest12sbv WITH (security_barrier=true) AS
   SELECT * FROM atest12 WHERE b <<< 5;
 -- This plan should use nestloop, knowing that few rows will be selected.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12v x, atest12v y WHERE x.a = y.b;
-                   QUERY PLAN                    
--------------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Nested Loop
    ->  Seq Scan on atest12 atest12_1
          Filter: (b <<< 5)
-   ->  Index Scan using atest12_a_idx on atest12
-         Index Cond: (a = atest12_1.b)
+   ->  Bitmap Heap Scan on atest12
+         Recheck Cond: (a = atest12_1.b)
          Filter: (b <<< 5)
-(6 rows)
+         ->  Bitmap Index Scan on atest12_a_idx
+               Index Cond: (a = atest12_1.b)
+(8 rows)
 
 -- And this one.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12 x, atest12 y
   WHERE x.a = y.b and abs(y.a) <<< 5;
-                    QUERY PLAN                     
----------------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Nested Loop
    ->  Seq Scan on atest12 y
          Filter: (abs(a) <<< 5)
-   ->  Index Scan using atest12_a_idx on atest12 x
-         Index Cond: (a = y.b)
-(5 rows)
+   ->  Bitmap Heap Scan on atest12 x
+         Recheck Cond: (a = y.b)
+         ->  Bitmap Index Scan on atest12_a_idx
+               Index Cond: (a = y.b)
+(7 rows)
 
 -- This should also be a nestloop, but the security barrier forces the inner
 -- scan to be materialized
@@ -552,15 +556,17 @@ SET SESSION AUTHORIZATION regress_priv_user2;
 -- These plans should continue to use a nestloop, since they execute with the
 -- privileges of the view owner.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12v x, atest12v y WHERE x.a = y.b;
-                   QUERY PLAN                    
--------------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Nested Loop
    ->  Seq Scan on atest12 atest12_1
          Filter: (b <<< 5)
-   ->  Index Scan using atest12_a_idx on atest12
-         Index Cond: (a = atest12_1.b)
+   ->  Bitmap Heap Scan on atest12
+         Recheck Cond: (a = atest12_1.b)
          Filter: (b <<< 5)
-(6 rows)
+         ->  Bitmap Index Scan on atest12_a_idx
+               Index Cond: (a = atest12_1.b)
+(8 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM atest12sbv x, atest12sbv y WHERE x.a = y.b;
                 QUERY PLAN                 
@@ -577,15 +583,17 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest12sbv x, atest12sbv y WHERE x.a = y.b;
 -- A non-security barrier view does not guard against information leakage.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12v x, atest12v y
   WHERE x.a = y.b and abs(y.a) <<< 5;
-                   QUERY PLAN                    
--------------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Nested Loop
    ->  Seq Scan on atest12 atest12_1
          Filter: ((b <<< 5) AND (abs(a) <<< 5))
-   ->  Index Scan using atest12_a_idx on atest12
-         Index Cond: (a = atest12_1.b)
+   ->  Bitmap Heap Scan on atest12
+         Recheck Cond: (a = atest12_1.b)
          Filter: (b <<< 5)
-(6 rows)
+         ->  Bitmap Index Scan on atest12_a_idx
+               Index Cond: (a = atest12_1.b)
+(8 rows)
 
 -- But a security barrier view isolates the leaky operator.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12sbv x, atest12sbv y
@@ -608,15 +616,17 @@ GRANT SELECT (a, b) ON atest12 TO PUBLIC;
 SET SESSION AUTHORIZATION regress_priv_user2;
 -- regress_priv_user2 should continue to get a good row estimate.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12v x, atest12v y WHERE x.a = y.b;
-                   QUERY PLAN                    
--------------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Nested Loop
    ->  Seq Scan on atest12 atest12_1
          Filter: (b <<< 5)
-   ->  Index Scan using atest12_a_idx on atest12
-         Index Cond: (a = atest12_1.b)
+   ->  Bitmap Heap Scan on atest12
+         Recheck Cond: (a = atest12_1.b)
          Filter: (b <<< 5)
-(6 rows)
+         ->  Bitmap Index Scan on atest12_a_idx
+               Index Cond: (a = atest12_1.b)
+(8 rows)
 
 -- But not for this, due to lack of table-wide permissions needed
 -- to make use of the expression index's statistics.

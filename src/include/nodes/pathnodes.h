@@ -1030,6 +1030,17 @@ typedef struct RelOptInfo
 	Cardinality rows;
 
 	/*
+	 * When this join relation attaches a base relation through its unique
+	 * key, that relation cannot offer more distinct rows than the other
+	 * side has distinct values of the join column.  Record the tightest
+	 * such bound: the rangetable index it applies to (0 if none) and the
+	 * row bound.  Any column of that relation is limited by it, because a
+	 * unique key determines the whole row.
+	 */
+	Index		join_cap_varno;
+	Cardinality join_cap_rows;
+
+	/*
 	 * per-relation planner control
 	 */
 	/* keep cheap-startup-cost paths? */

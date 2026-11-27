@@ -2886,6 +2886,33 @@ eqjoinsel(PG_FUNCTION_ARGS)
 		stats2 = &stats2_copy;
 	}
 
+	/*
+	 * A restriction on one side of the join changes what that side can offer.
+	 * Two regimes:
+	 *
+	 * - If the other side's domain is small enough to fit entirely inside the
+	 *   values that survive the restriction, assume it does: the survivors
+	 *   cover that domain and the join keeps a fraction 1/survivors instead of
+	 *   1/domain.
+	 *
+	 * - If the other side's domain is larger, assume the survivors are a
+	 *   uniform sample of the domain and keep the domain size.
+	 *
+	 * Measured on TPC-DS: inventory.inv_date_sk (261 values) joined to
+	 * date_dim restricted to one year (365 rows out of 73,049) -- keeping the
+	 * domain under-estimates the join by 200x.  Measured on JOB:
+	 * movie_info_idx.info_type_id (4 values) joined to info_type restricted to
+	 * a single row -- capping to that row over-estimates by 47,000x.
+	 */
+	if (vardata1.rel != NULL && vardata1.rel->tuples > 0 &&
+		vardata1.rel->rows < vardata1.rel->tuples &&
+		nd2 > 0 && nd2 <= vardata1.rel->rows)
+		nd1 = Min(nd1, vardata1.rel->rows);
+	if (vardata2.rel != NULL && vardata2.rel->tuples > 0 &&
+		vardata2.rel->rows < vardata2.rel->tuples &&
+		nd1 > 0 && nd1 <= vardata2.rel->rows)
+		nd2 = Min(nd2, vardata2.rel->rows);
+
 	/* Prepare info usable by both eqjoinsel_inner and eqjoinsel_semi */
 	if (have_mcvs1 && have_mcvs2)
 	{
@@ -5161,6 +5188,7 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 		double		reldistinct = 1;
 		double		relmaxndistinct = reldistinct;
 		int			relvarcount = 0;
+		bool		group_on_unique_key = false;
 		List	   *newvarinfos = NIL;
 		List	   *relvarinfos = NIL;
 
@@ -5183,6 +5211,41 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 				/* not time to process varinfo2 yet */
 				newvarinfos = lappend(newvarinfos, varinfo2);
 			}
+		}
+
+		/*
+		 * If the grouping columns are exactly a unique key of the relation,
+		 * every row is already its own group.  The factor-of-ten clamp below
+		 * exists because several grouping columns are usually correlated in
+		 * an unknown way; here the worst case is the truth, and applying the
+		 * clamp invents a reduction that cannot happen.  Measured (DS39): a
+		 * GROUP BY over all three key columns of inventory was predicted to
+		 * shrink tenfold, which made aggregating 11.7M rows before the joins
+		 * look cheaper than joining first.
+		 */
+		if (rel->reloptkind == RELOPT_BASEREL && rel->tuples > 0)
+		{
+			List	   *keyvars = NIL;
+			bool		allvars = true;
+			ListCell   *lc2;
+
+			foreach(lc2, relvarinfos)
+			{
+				GroupVarInfo *varinfo2 = (GroupVarInfo *) lfirst(lc2);
+
+				if (IsA(varinfo2->var, Var) &&
+					((Var *) varinfo2->var)->varattno > 0)
+					keyvars = lappend(keyvars, varinfo2->var);
+				else
+				{
+					allvars = false;
+					break;
+				}
+			}
+			if (allvars)
+				group_on_unique_key =
+					relation_has_unique_key_for(rel, keyvars);
+			list_free(keyvars);
 		}
 
 		/*
@@ -5248,7 +5311,7 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 			 */
 			double		clamp = rel->tuples;
 
-			if (relvarcount > 1)
+			if (relvarcount > 1 && !group_on_unique_key)
 			{
 				clamp *= 0.1;
 				if (clamp < relmaxndistinct)
@@ -8947,7 +9010,7 @@ genericcostestimate(PlannerInfo *root,
 	 * CPU cost: any complex expressions in the indexquals will need to be
 	 * evaluated once at the start of the scan to reduce them to runtime keys
 	 * to pass to the index AM (see nodeIndexscan.c).  We model the per-tuple
-	 * CPU costs as cpu_index_tuple_cost plus one cpu_operator_cost per
+	 * CPU costs as cpu_index_tuple_cost plus one COST_OP_INDEX per
 	 * indexqual operator.  Because we have numIndexTuples as a per-scan
 	 * number, we have to multiply by num_sa_scans to get the correct result
 	 * for ScalarArrayOpExpr cases.  Similarly add in costs for any index
@@ -8959,7 +9022,7 @@ genericcostestimate(PlannerInfo *root,
 	 */
 	qual_arg_cost = index_other_operands_eval_cost(root, indexQuals) +
 		index_other_operands_eval_cost(root, indexOrderBys);
-	qual_op_cost = cpu_operator_cost *
+	qual_op_cost = COST_OP_INDEX *
 		(list_length(indexQuals) + list_length(indexOrderBys));
 
 	indexStartupCost = qual_arg_cost;
@@ -9503,7 +9566,7 @@ btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	if (index->tuples > 1)		/* avoid computing log(0) */
 	{
-		descentCost = ceil(log(index->tuples) / log(2.0)) * cpu_operator_cost;
+		descentCost = ceil(log(index->tuples) / log(2.0)) * COST_OP_DESCENT;
 		costs.indexStartupCost += descentCost;
 		costs.indexTotalCost += costs.num_sa_scans * descentCost;
 	}
@@ -9519,7 +9582,7 @@ btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * we charge for the leaf page too).  As above, charge once per estimated
 	 * SAOP/skip array descent.
 	 */
-	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * COST_OP_DESCENT;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -9626,7 +9689,7 @@ gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	if (index->tuples > 1)		/* avoid computing log(0) */
 	{
-		descentCost = ceil(log(index->tuples)) * cpu_operator_cost;
+		descentCost = ceil(log(index->tuples)) * COST_OP_DESCENT;
 		costs.indexStartupCost += descentCost;
 		costs.indexTotalCost += costs.num_sa_scans * descentCost;
 	}
@@ -9634,7 +9697,7 @@ gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	/*
 	 * Likewise add a per-page charge, calculated the same as for btrees.
 	 */
-	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * COST_OP_DESCENT;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -9684,7 +9747,7 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	if (index->tuples > 1)		/* avoid computing log(0) */
 	{
-		descentCost = ceil(log(index->tuples)) * cpu_operator_cost;
+		descentCost = ceil(log(index->tuples)) * COST_OP_DESCENT;
 		costs.indexStartupCost += descentCost;
 		costs.indexTotalCost += costs.num_sa_scans * descentCost;
 	}
@@ -9692,7 +9755,7 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	/*
 	 * Likewise add a per-page charge, calculated the same as for btrees.
 	 */
-	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * COST_OP_DESCENT;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -10375,7 +10438,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * those.
 	 */
 	qual_arg_cost = index_other_operands_eval_cost(root, indexQuals);
-	qual_op_cost = cpu_operator_cost * list_length(indexQuals);
+	qual_op_cost = COST_OP_INDEX * list_length(indexQuals);
 
 	*indexStartupCost += qual_arg_cost;
 	*indexTotalCost += qual_arg_cost;

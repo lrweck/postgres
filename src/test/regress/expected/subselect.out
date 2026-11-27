@@ -741,48 +741,54 @@ order by t1.a, t2.a;
 ------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: t1.a, t1.b, t2.a, t2.b
-   ->  Merge Join
+   ->  Nested Loop
          Output: t1.a, t1.b, t3.b
-         Merge Cond: (t3.a = t1.a)
          ->  Unique
                Output: t3.a, t3.b
                ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t3
                      Output: t3.a, t3.b
-         ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t1
+         ->  Memoize
                Output: t1.a, t1.b
+               Cache Key: t3.a
+               Cache Mode: logical
+               ->  Bitmap Heap Scan on public.semijoin_unique_tbl t1
+                     Output: t1.a, t1.b
+                     Recheck Cond: (t1.a = t3.a)
+                     ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                           Index Cond: (t1.a = t3.a)
    ->  Memoize
          Output: t2.a, t2.b
          Cache Key: t3.b
          Cache Mode: logical
-         ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t2
+         ->  Bitmap Heap Scan on public.semijoin_unique_tbl t2
                Output: t2.a, t2.b
-               Index Cond: (t2.a = t3.b)
-(18 rows)
+               Recheck Cond: (t2.a = t3.b)
+               ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                     Index Cond: (t2.a = t3.b)
+(26 rows)
 
 -- Ensure that we can unique-ify expressions more complex than plain Vars
 explain (verbose, costs off)
 select * from semijoin_unique_tbl t1, semijoin_unique_tbl t2
 where (t1.a, t2.a) in (select a+1, b+1 from semijoin_unique_tbl t3)
 order by t1.a, t2.a;
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
- Incremental Sort
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Sort
    Output: t1.a, t1.b, t2.a, t2.b
    Sort Key: t1.a, t2.a
-   Presorted Key: t1.a
-   ->  Merge Join
+   ->  Hash Join
          Output: t1.a, t1.b, t2.a, t2.b
-         Merge Cond: (t1.a = ((t3.a + 1)))
-         ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t1
-               Output: t1.a, t1.b
-         ->  Sort
-               Output: t2.a, t2.b, t3.a, ((t3.a + 1))
-               Sort Key: ((t3.a + 1))
+         Hash Cond: (t2.a = (t3.b + 1))
+         ->  Seq Scan on public.semijoin_unique_tbl t2
+               Output: t2.a, t2.b
+         ->  Hash
+               Output: t1.a, t1.b, t3.b
                ->  Hash Join
-                     Output: t2.a, t2.b, t3.a, (t3.a + 1)
-                     Hash Cond: (t2.a = (t3.b + 1))
-                     ->  Seq Scan on public.semijoin_unique_tbl t2
-                           Output: t2.a, t2.b
+                     Output: t1.a, t1.b, t3.b
+                     Hash Cond: (t1.a = (t3.a + 1))
+                     ->  Seq Scan on public.semijoin_unique_tbl t1
+                           Output: t1.a, t1.b
                      ->  Hash
                            Output: t3.a, t3.b
                            ->  HashAggregate
@@ -790,7 +796,7 @@ order by t1.a, t2.a;
                                  Group Key: (t3.a + 1), (t3.b + 1)
                                  ->  Seq Scan on public.semijoin_unique_tbl t3
                                        Output: t3.a, t3.b, (t3.a + 1), (t3.b + 1)
-(24 rows)
+(22 rows)
 
 -- encourage use of parallel plans
 set parallel_setup_cost=0;
@@ -807,32 +813,29 @@ order by t1.a, t2.a;
 ----------------------------------------------------------------------------------------
  Nested Loop
    Output: t1.a, t1.b, t2.a, t2.b
-   ->  Merge Join
+   ->  Nested Loop
          Output: t1.a, t1.b, t3.b
-         Merge Cond: (t3.a = t1.a)
          ->  Unique
                Output: t3.a, t3.b
                ->  Gather Merge
                      Output: t3.a, t3.b
                      Workers Planned: 2
-                     ->  Sort
+                     ->  Unique
                            Output: t3.a, t3.b
-                           Sort Key: t3.a, t3.b
-                           ->  HashAggregate
+                           ->  Sort
                                  Output: t3.a, t3.b
-                                 Group Key: t3.a, t3.b
+                                 Sort Key: t3.a, t3.b
                                  ->  Parallel Seq Scan on public.semijoin_unique_tbl t3
                                        Output: t3.a, t3.b
-         ->  Materialize
+         ->  Memoize
                Output: t1.a, t1.b
-               ->  Gather Merge
+               Cache Key: t3.a
+               Cache Mode: logical
+               ->  Bitmap Heap Scan on public.semijoin_unique_tbl t1
                      Output: t1.a, t1.b
-                     Workers Planned: 2
-                     ->  Sort
-                           Output: t1.a, t1.b
-                           Sort Key: t1.a
-                           ->  Parallel Seq Scan on public.semijoin_unique_tbl t1
-                                 Output: t1.a, t1.b
+                     Recheck Cond: (t1.a = t3.a)
+                     ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                           Index Cond: (t1.a = t3.a)
    ->  Memoize
          Output: t2.a, t2.b
          Cache Key: t3.b
@@ -842,7 +845,7 @@ order by t1.a, t2.a;
                Recheck Cond: (t2.a = t3.b)
                ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
                      Index Cond: (t2.a = t3.b)
-(37 rows)
+(34 rows)
 
 reset enable_indexscan;
 reset max_parallel_workers_per_gather;
@@ -869,51 +872,67 @@ where (t1.a, t2.a) in (select a, a from unique_tbl_p t3)
 order by t1.a, t2.a;
                                            QUERY PLAN                                           
 ------------------------------------------------------------------------------------------------
- Merge Join
-   Output: t1.a, t1.b, t2.a, t2.b
-   Merge Cond: (t1.a = t2.a)
-   ->  Merge Append
-         Sort Key: t1.a
+ Merge Append
+   Sort Key: t1.a
+   ->  Nested Loop
+         Output: t1_1.a, t1_1.b, t2_1.a, t2_1.b
          ->  Nested Loop
                Output: t1_1.a, t1_1.b, t3_1.a
                ->  Unique
                      Output: t3_1.a
                      ->  Index Only Scan using unique_tbl_p1_a_idx on public.unique_tbl_p1 t3_1
                            Output: t3_1.a
-               ->  Index Scan using unique_tbl_p1_a_idx on public.unique_tbl_p1 t1_1
+               ->  Bitmap Heap Scan on public.unique_tbl_p1 t1_1
                      Output: t1_1.a, t1_1.b
-                     Index Cond: (t1_1.a = t3_1.a)
+                     Recheck Cond: (t1_1.a = t3_1.a)
+                     ->  Bitmap Index Scan on unique_tbl_p1_a_idx
+                           Index Cond: (t1_1.a = t3_1.a)
+         ->  Bitmap Heap Scan on public.unique_tbl_p1 t2_1
+               Output: t2_1.a, t2_1.b
+               Recheck Cond: (t2_1.a = t1_1.a)
+               ->  Bitmap Index Scan on unique_tbl_p1_a_idx
+                     Index Cond: (t2_1.a = t1_1.a)
+   ->  Nested Loop
+         Output: t1_2.a, t1_2.b, t2_2.a, t2_2.b
          ->  Nested Loop
                Output: t1_2.a, t1_2.b, t3_2.a
                ->  Unique
                      Output: t3_2.a
                      ->  Index Only Scan using unique_tbl_p2_a_idx on public.unique_tbl_p2 t3_2
                            Output: t3_2.a
-               ->  Index Scan using unique_tbl_p2_a_idx on public.unique_tbl_p2 t1_2
+               ->  Bitmap Heap Scan on public.unique_tbl_p2 t1_2
                      Output: t1_2.a, t1_2.b
-                     Index Cond: (t1_2.a = t3_2.a)
+                     Recheck Cond: (t1_2.a = t3_2.a)
+                     ->  Bitmap Index Scan on unique_tbl_p2_a_idx
+                           Index Cond: (t1_2.a = t3_2.a)
+         ->  Bitmap Heap Scan on public.unique_tbl_p2 t2_2
+               Output: t2_2.a, t2_2.b
+               Recheck Cond: (t2_2.a = t1_2.a)
+               ->  Bitmap Index Scan on unique_tbl_p2_a_idx
+                     Index Cond: (t2_2.a = t1_2.a)
+   ->  Nested Loop
+         Output: t1_3.a, t1_3.b, t2_3.a, t2_3.b
          ->  Nested Loop
                Output: t1_3.a, t1_3.b, t3_3.a
                ->  Unique
                      Output: t3_3.a
-                     ->  Sort
+                     ->  Index Only Scan using unique_tbl_p3_a_idx on public.unique_tbl_p3 t3_3
                            Output: t3_3.a
-                           Sort Key: t3_3.a
-                           ->  Seq Scan on public.unique_tbl_p3 t3_3
-                                 Output: t3_3.a
-               ->  Index Scan using unique_tbl_p3_a_idx on public.unique_tbl_p3 t1_3
+               ->  Bitmap Heap Scan on public.unique_tbl_p3 t1_3
                      Output: t1_3.a, t1_3.b
-                     Index Cond: (t1_3.a = t3_3.a)
-   ->  Materialize
-         Output: t2.a, t2.b
-         ->  Append
-               ->  Index Scan using unique_tbl_p1_a_idx on public.unique_tbl_p1 t2_1
-                     Output: t2_1.a, t2_1.b
-               ->  Index Scan using unique_tbl_p2_a_idx on public.unique_tbl_p2 t2_2
-                     Output: t2_2.a, t2_2.b
-               ->  Index Scan using unique_tbl_p3_a_idx on public.unique_tbl_p3 t2_3
+                     Recheck Cond: (t1_3.a = t3_3.a)
+                     ->  Bitmap Index Scan on unique_tbl_p3_a_idx
+                           Index Cond: (t1_3.a = t3_3.a)
+         ->  Memoize
+               Output: t2_3.a, t2_3.b
+               Cache Key: t1_3.a
+               Cache Mode: logical
+               ->  Bitmap Heap Scan on public.unique_tbl_p3 t2_3
                      Output: t2_3.a, t2_3.b
-(44 rows)
+                     Recheck Cond: (t2_3.a = t1_3.a)
+                     ->  Bitmap Index Scan on unique_tbl_p3_a_idx
+                           Index Cond: (t2_3.a = t1_3.a)
+(60 rows)
 
 reset enable_partitionwise_join;
 drop table unique_tbl_p;
@@ -1284,7 +1303,7 @@ where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0);
    ->  Seq Scan on tenk1 t
          Filter: ((ANY (unique2 = (hashed SubPlan exists_to_any_1).col1)) OR (ten < 0))
          SubPlan exists_to_any_1
-           ->  Index Only Scan using tenk1_unique1 on tenk1 k
+           ->  Seq Scan on tenk1 k
 (5 rows)
 
 select count(*) from tenk1 t
@@ -1455,14 +1474,16 @@ where o.ten = 0;
          ->  Seq Scan on public.onek o
                Output: o.unique1, o.unique2, o.two, o.four, o.ten, o.twenty, o.hundred, o.thousand, o.twothousand, o.fivethous, o.tenthous, o.odd, o.even, o.stringu1, o.stringu2, o.string4
                Filter: (o.ten = 0)
-         ->  Index Scan using onek_unique1 on public.onek i
+         ->  Bitmap Heap Scan on public.onek i
                Output: (ANY (i.ten = (hashed SubPlan any_1).col1)), random()
-               Index Cond: (i.unique1 = o.unique1)
+               Recheck Cond: (i.unique1 = o.unique1)
+               ->  Bitmap Index Scan on onek_unique1
+                     Index Cond: (i.unique1 = o.unique1)
                SubPlan any_1
                  ->  Seq Scan on public.int4_tbl
                        Output: int4_tbl.f1
                        Filter: (int4_tbl.f1 <= o.hundred)
-(14 rows)
+(16 rows)
 
 select sum(ss.tst::int) from
   onek o cross join lateral (
@@ -1521,18 +1542,22 @@ select count(*) from
     select * from onek i2 where i2.unique1 = o.unique2
   ) ss
 where o.ten = 1;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Aggregate
    ->  Nested Loop
          ->  Seq Scan on onek o
                Filter: (ten = 1)
          ->  HashSetOp Except
-               ->  Index Scan using onek_unique1 on onek i1
-                     Index Cond: (unique1 = o.unique1)
-               ->  Index Scan using onek_unique1 on onek i2
-                     Index Cond: (unique1 = o.unique2)
-(9 rows)
+               ->  Bitmap Heap Scan on onek i1
+                     Recheck Cond: (unique1 = o.unique1)
+                     ->  Bitmap Index Scan on onek_unique1
+                           Index Cond: (unique1 = o.unique1)
+               ->  Bitmap Heap Scan on onek i2
+                     Recheck Cond: (unique1 = o.unique2)
+                     ->  Bitmap Index Scan on onek_unique1
+                           Index Cond: (unique1 = o.unique2)
+(13 rows)
 
 select count(*) from
   onek o cross join lateral (
@@ -1569,13 +1594,17 @@ where o.ten = 1;
          ->  SetOp Except
                ->  Sort
                      Sort Key: i1.unique1, i1.unique2, i1.two, i1.four, i1.ten, i1.twenty, i1.hundred, i1.thousand, i1.twothousand, i1.fivethous, i1.tenthous, i1.odd, i1.even, i1.stringu1, i1.stringu2, i1.string4
-                     ->  Index Scan using onek_unique1 on onek i1
-                           Index Cond: (unique1 = o.unique1)
+                     ->  Bitmap Heap Scan on onek i1
+                           Recheck Cond: (unique1 = o.unique1)
+                           ->  Bitmap Index Scan on onek_unique1
+                                 Index Cond: (unique1 = o.unique1)
                ->  Sort
                      Sort Key: i2.unique1, i2.unique2, i2.two, i2.four, i2.ten, i2.twenty, i2.hundred, i2.thousand, i2.twothousand, i2.fivethous, i2.tenthous, i2.odd, i2.even, i2.stringu1, i2.stringu2, i2.string4
-                     ->  Index Scan using onek_unique1 on onek i2
-                           Index Cond: (unique1 = o.unique2)
-(13 rows)
+                     ->  Bitmap Heap Scan on onek i2
+                           Recheck Cond: (unique1 = o.unique2)
+                           ->  Bitmap Index Scan on onek_unique1
+                                 Index Cond: (unique1 = o.unique2)
+(17 rows)
 
 select count(*) from
   onek o cross join lateral (
@@ -1764,7 +1793,7 @@ select * from int4_tbl where
    ->  Seq Scan on public.tenk1 b
          Output: b.unique1, b.unique2, b.two, b.four, b.ten, b.twenty, b.hundred, b.thousand, b.twothousand, b.fivethous, b.tenthous, b.odd, b.even, b.stringu1, b.stringu2, b.string4
    SubPlan any_1
-     ->  Index Only Scan using tenk1_unique1 on public.tenk1 a
+     ->  Seq Scan on public.tenk1 a
            Output: a.unique1
 (10 rows)
 
@@ -1782,14 +1811,12 @@ select * from int4_tbl where
 explain (verbose, costs off)
 select * from int4_tbl o where (f1, f1) in
   (select f1, generate_series(1,50) / 10 g from int4_tbl i group by f1);
-                            QUERY PLAN                             
--------------------------------------------------------------------
- Nested Loop Semi Join
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Nested Loop
    Output: o.f1
    Join Filter: (o.f1 = unnamed_subquery.f1)
-   ->  Seq Scan on public.int4_tbl o
-         Output: o.f1
-   ->  Materialize
+   ->  Unique
          Output: unnamed_subquery.f1, unnamed_subquery.g
          ->  Subquery Scan on unnamed_subquery
                Output: unnamed_subquery.f1, unnamed_subquery.g
@@ -1798,12 +1825,17 @@ select * from int4_tbl o where (f1, f1) in
                      Output: i.f1, ((generate_series(1, 50)) / 10)
                      ->  ProjectSet
                            Output: generate_series(1, 50), i.f1
-                           ->  HashAggregate
+                           ->  Group
                                  Output: i.f1
                                  Group Key: i.f1
-                                 ->  Seq Scan on public.int4_tbl i
+                                 ->  Sort
                                        Output: i.f1
-(19 rows)
+                                       Sort Key: i.f1
+                                       ->  Seq Scan on public.int4_tbl i
+                                             Output: i.f1
+   ->  Seq Scan on public.int4_tbl o
+         Output: o.f1
+(22 rows)
 
 select * from int4_tbl o where (f1, f1) in
   (select f1, generate_series(1,50) / 10 g from int4_tbl i group by f1);
@@ -2053,23 +2085,20 @@ explain (verbose, costs off)
 select * from
   (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
   where ss.v;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  Subquery Scan on ss
    Output: ss.v, ss.count
    Filter: ss.v
-   ->  GroupAggregate
+   ->  HashAggregate
          Output: (tattle(3, tenk1.ten)), count(*)
-         Group Key: (tattle(3, tenk1.ten))
-         ->  Sort
-               Output: (tattle(3, tenk1.ten))
-               Sort Key: (tattle(3, tenk1.ten))
-               ->  Bitmap Heap Scan on public.tenk1
-                     Output: tattle(3, tenk1.ten)
-                     Recheck Cond: (tenk1.unique1 < 3)
-                     ->  Bitmap Index Scan on tenk1_unique1
-                           Index Cond: (tenk1.unique1 < 3)
-(14 rows)
+         Group Key: tattle(3, tenk1.ten)
+         ->  Bitmap Heap Scan on public.tenk1
+               Output: tattle(3, tenk1.ten)
+               Recheck Cond: (tenk1.unique1 < 3)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (tenk1.unique1 < 3)
+(11 rows)
 
 select * from
   (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
@@ -2088,21 +2117,18 @@ explain (verbose, costs off)
 select * from
   (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
   where ss.v;
-                      QUERY PLAN                      
-------------------------------------------------------
- GroupAggregate
+                   QUERY PLAN                   
+------------------------------------------------
+ HashAggregate
    Output: (tattle(3, tenk1.ten)), count(*)
-   Group Key: (tattle(3, tenk1.ten))
-   ->  Sort
-         Output: (tattle(3, tenk1.ten))
-         Sort Key: (tattle(3, tenk1.ten))
-         ->  Bitmap Heap Scan on public.tenk1
-               Output: tattle(3, tenk1.ten)
-               Recheck Cond: (tenk1.unique1 < 3)
-               Filter: tattle(3, tenk1.ten)
-               ->  Bitmap Index Scan on tenk1_unique1
-                     Index Cond: (tenk1.unique1 < 3)
-(12 rows)
+   Group Key: tattle(3, tenk1.ten)
+   ->  Bitmap Heap Scan on public.tenk1
+         Output: tattle(3, tenk1.ten)
+         Recheck Cond: (tenk1.unique1 < 3)
+         Filter: tattle(3, tenk1.ten)
+         ->  Bitmap Index Scan on tenk1_unique1
+               Index Cond: (tenk1.unique1 < 3)
+(9 rows)
 
 select * from
   (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
@@ -2466,14 +2492,18 @@ select relname::information_schema.sql_identifier as tname, * from
   (select * from pg_class c) ss1) ss2
   right join pg_attribute a on a.attrelid = ss2.oid
 where tname = 'tenk1' and attnum = 1;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Nested Loop
-   ->  Index Scan using pg_class_relname_nsp_index on pg_class c
-         Index Cond: (relname = 'tenk1'::name)
-   ->  Index Scan using pg_attribute_relid_attnum_index on pg_attribute a
-         Index Cond: ((attrelid = c.oid) AND (attnum = 1))
-(5 rows)
+   ->  Bitmap Heap Scan on pg_class c
+         Recheck Cond: (relname = 'tenk1'::name)
+         ->  Bitmap Index Scan on pg_class_relname_nsp_index
+               Index Cond: (relname = 'tenk1'::name)
+   ->  Bitmap Heap Scan on pg_attribute a
+         Recheck Cond: ((attrelid = c.oid) AND (attnum = 1))
+         ->  Bitmap Index Scan on pg_attribute_relid_attnum_index
+               Index Cond: ((attrelid = c.oid) AND (attnum = 1))
+(9 rows)
 
 select tname, attname from (
 select relname::information_schema.sql_identifier as tname, * from
@@ -3038,29 +3068,25 @@ with x as (select * from (select f1, now() as n from subselect_tbl) ss)
 select * from x, x x2 where x.n = x2.n;
                 QUERY PLAN                 
 -------------------------------------------
- Merge Join
+ Hash Join
    Output: x.f1, x.n, x2.f1, x2.n
-   Merge Cond: (x.n = x2.n)
+   Hash Cond: (x.n = x2.n)
    CTE x
      ->  Seq Scan on public.subselect_tbl
            Output: subselect_tbl.f1, now()
-   ->  Sort
+   ->  CTE Scan on x
          Output: x.f1, x.n
-         Sort Key: x.n
-         ->  CTE Scan on x
-               Output: x.f1, x.n
-   ->  Sort
+   ->  Hash
          Output: x2.f1, x2.n
-         Sort Key: x2.n
          ->  CTE Scan on x x2
                Output: x2.f1, x2.n
-(16 rows)
+(12 rows)
 
 explain (verbose, costs off)
 with x as not materialized (select * from (select f1, now() as n from subselect_tbl) ss)
 select * from x, x x2 where x.n = x2.n;
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Result
    Output: subselect_tbl.f1, now(), subselect_tbl_1.f1, now()
    One-Time Filter: (now() = now())
@@ -3068,11 +3094,9 @@ select * from x, x x2 where x.n = x2.n;
          Output: subselect_tbl.f1, subselect_tbl_1.f1
          ->  Seq Scan on public.subselect_tbl
                Output: subselect_tbl.f1, subselect_tbl.f2, subselect_tbl.f3
-         ->  Materialize
-               Output: subselect_tbl_1.f1
-               ->  Seq Scan on public.subselect_tbl subselect_tbl_1
-                     Output: subselect_tbl_1.f1
-(11 rows)
+         ->  Seq Scan on public.subselect_tbl subselect_tbl_1
+               Output: subselect_tbl_1.f1, subselect_tbl_1.f2, subselect_tbl_1.f3
+(9 rows)
 
 -- Multiply-referenced CTEs can't be inlined if they contain outer self-refs
 explain (verbose, costs off)
@@ -3241,12 +3265,11 @@ WHERE c.odd = b.odd));
  Nested Loop Semi Join
    Join Filter: (ANY (a.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
-         ->  Seq Scan on tenk2 b
+   ->  Seq Scan on tenk2 b
    SubPlan any_1
      ->  Seq Scan on tenk2 c
            Filter: (odd = b.odd)
-(8 rows)
+(7 rows)
 
 -- we should only try to pull up the sublink into RHS of a left join
 -- but a.hundred is not available.
@@ -3258,12 +3281,11 @@ ON A.hundred in (SELECT c.hundred FROM tenk2 C WHERE c.odd = b.odd);
  Nested Loop Left Join
    Join Filter: (ANY (a.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
-         ->  Seq Scan on tenk2 b
+   ->  Seq Scan on tenk2 b
    SubPlan any_1
      ->  Seq Scan on tenk2 c
            Filter: (odd = b.odd)
-(8 rows)
+(7 rows)
 
 -- we should only try to pull up the sublink into RHS of a left join
 -- but a.odd is not available for this.
@@ -3275,12 +3297,11 @@ ON B.hundred in (SELECT c.hundred FROM tenk2 C WHERE c.odd = a.odd);
  Nested Loop Left Join
    Join Filter: (ANY (b.hundred = (SubPlan any_1).col1))
    ->  Seq Scan on tenk1 a
-   ->  Materialize
-         ->  Seq Scan on tenk2 b
+   ->  Seq Scan on tenk2 b
    SubPlan any_1
      ->  Seq Scan on tenk2 c
            Filter: (odd = a.odd)
-(8 rows)
+(7 rows)
 
 -- should be able to pull up since all the references are available.
 explain (costs off)
@@ -3353,13 +3374,15 @@ ON B.hundred in (SELECT min(c.hundred) FROM tenk2 C WHERE c.odd = b.odd);
 EXPLAIN (COSTS OFF)
 SELECT * FROM onek, (VALUES('RFAAAA'), ('VJAAAA')) AS v (i)
   WHERE onek.stringu1 = v.i;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Nested Loop
    ->  Values Scan on "*VALUES*"
-   ->  Index Scan using onek_stringu1 on onek
-         Index Cond: (stringu1 = ("*VALUES*".column1)::text)
-(4 rows)
+   ->  Bitmap Heap Scan on onek
+         Recheck Cond: (stringu1 = ("*VALUES*".column1)::text)
+         ->  Bitmap Index Scan on onek_stringu1
+               Index Cond: (stringu1 = ("*VALUES*".column1)::text)
+(6 rows)
 
 -- VtA transformation for a composite argument is not supported
 EXPLAIN (COSTS OFF)
@@ -3373,24 +3396,24 @@ SELECT * FROM onek
          ->  Sort
                Sort Key: "*VALUES*".column1, "*VALUES*".column2
                ->  Values Scan on "*VALUES*"
-   ->  Index Scan using onek_unique1 on onek
-         Index Cond: (unique1 = "*VALUES*".column1)
+   ->  Bitmap Heap Scan on onek
+         Recheck Cond: (unique1 = "*VALUES*".column1)
          Filter: ("*VALUES*".column2 = ten)
-(8 rows)
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = "*VALUES*".column1)
+(10 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM onek
     WHERE unique1 IN (VALUES(10000), (2), (389), (1000), (2000), (10029))
     ORDER BY unique1;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Sort
    Sort Key: unique1
-   ->  Bitmap Heap Scan on onek
-         Recheck Cond: (unique1 = ANY ('{10000,2,389,1000,2000,10029}'::integer[]))
-         ->  Bitmap Index Scan on onek_unique1
-               Index Cond: (unique1 = ANY ('{10000,2,389,1000,2000,10029}'::integer[]))
-(6 rows)
+   ->  Seq Scan on onek
+         Filter: (unique1 = ANY ('{10000,2,389,1000,2000,10029}'::integer[]))
+(4 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM onek
@@ -3407,16 +3430,18 @@ SELECT * FROM onek
 EXPLAIN (COSTS OFF)
 SELECT * FROM onek
   WHERE unique1 IN (SELECT x * x FROM (VALUES(1200), (1)) AS x(x));
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
  Nested Loop
    ->  Unique
          ->  Sort
                Sort Key: (("*VALUES*".column1 * "*VALUES*".column1))
                ->  Values Scan on "*VALUES*"
-   ->  Index Scan using onek_unique1 on onek
-         Index Cond: (unique1 = ("*VALUES*".column1 * "*VALUES*".column1))
-(7 rows)
+   ->  Bitmap Heap Scan on onek
+         Recheck Cond: (unique1 = ("*VALUES*".column1 * "*VALUES*".column1))
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = ("*VALUES*".column1 * "*VALUES*".column1))
+(9 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT unique1, stringu1 FROM onek WHERE stringu1::name IN (VALUES('RFAAAA'), ('VJAAAA'));
@@ -3450,14 +3475,14 @@ SELECT * from onek WHERE unique1 in (VALUES(1200::bigint), (1));
 EXPLAIN (COSTS OFF)
 SELECT c.unique1,c.ten FROM tenk1 c JOIN onek a USING (ten)
 WHERE a.ten IN (VALUES (1), (2));
-                    QUERY PLAN                    
---------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Hash Join
-   Hash Cond: (a.ten = c.ten)
-   ->  Seq Scan on onek a
-         Filter: (ten = ANY ('{1,2}'::integer[]))
+   Hash Cond: (c.ten = a.ten)
+   ->  Seq Scan on tenk1 c
    ->  Hash
-         ->  Seq Scan on tenk1 c
+         ->  Seq Scan on onek a
+               Filter: (ten = ANY ('{1,2}'::integer[]))
 (6 rows)
 
 EXPLAIN (COSTS OFF)
@@ -3533,42 +3558,50 @@ RESET plan_cache_mode;
 --  VtA doesn't support LIMIT, OFFSET, and ORDER BY clauses
 EXPLAIN (COSTS OFF)
 SELECT ten FROM onek WHERE unique1 IN (VALUES (1), (2) OFFSET 1);
-                     QUERY PLAN                     
-----------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Nested Loop
-   ->  HashAggregate
-         Group Key: "*VALUES*".column1
-         ->  Limit
-               ->  Values Scan on "*VALUES*"
-   ->  Index Scan using onek_unique1 on onek
-         Index Cond: (unique1 = "*VALUES*".column1)
-(7 rows)
+   ->  Unique
+         ->  Sort
+               Sort Key: "*VALUES*".column1
+               ->  Limit
+                     ->  Values Scan on "*VALUES*"
+   ->  Bitmap Heap Scan on onek
+         Recheck Cond: (unique1 = "*VALUES*".column1)
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = "*VALUES*".column1)
+(10 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT ten FROM onek WHERE unique1 IN (VALUES (1), (2) ORDER BY 1);
-                     QUERY PLAN                     
-----------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Nested Loop
    ->  Unique
          ->  Sort
                Sort Key: "*VALUES*".column1
                ->  Values Scan on "*VALUES*"
-   ->  Index Scan using onek_unique1 on onek
-         Index Cond: (unique1 = "*VALUES*".column1)
-(7 rows)
+   ->  Bitmap Heap Scan on onek
+         Recheck Cond: (unique1 = "*VALUES*".column1)
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = "*VALUES*".column1)
+(9 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT ten FROM onek WHERE unique1 IN (VALUES (1), (2) LIMIT 1);
-                     QUERY PLAN                     
-----------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Nested Loop
-   ->  HashAggregate
-         Group Key: "*VALUES*".column1
-         ->  Limit
-               ->  Values Scan on "*VALUES*"
-   ->  Index Scan using onek_unique1 on onek
-         Index Cond: (unique1 = "*VALUES*".column1)
-(7 rows)
+   ->  Unique
+         ->  Sort
+               Sort Key: "*VALUES*".column1
+               ->  Limit
+                     ->  Values Scan on "*VALUES*"
+   ->  Bitmap Heap Scan on onek
+         Recheck Cond: (unique1 = "*VALUES*".column1)
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = "*VALUES*".column1)
+(10 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT ten FROM onek t
@@ -3597,19 +3630,21 @@ WHERE unique1 IN (VALUES (0), ((2 IN (SELECT unique2 FROM onek c
                Sort Key: "*VALUES*".column1
                ->  Values Scan on "*VALUES*"
                      SubPlan any_1
-                       ->  Index Only Scan using onek_unique2 on onek c
+                       ->  Seq Scan on onek c
                              Filter: ((unique2)::double precision = ANY ('{0.479425538604203,2}'::double precision[]))
-   ->  Index Scan using onek_unique1 on onek t
-         Index Cond: (unique1 = "*VALUES*".column1)
-(10 rows)
+   ->  Bitmap Heap Scan on onek t
+         Recheck Cond: (unique1 = "*VALUES*".column1)
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = "*VALUES*".column1)
+(12 rows)
 
 -- VtA is not allowed with subqueries
 EXPLAIN (COSTS OFF)
 SELECT ten FROM onek t WHERE unique1 IN (VALUES (0), ((2 IN
   (SELECT (3)))::integer)
 );
-                     QUERY PLAN                     
-----------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Nested Loop
    ->  Unique
          ->  Sort
@@ -3617,9 +3652,11 @@ SELECT ten FROM onek t WHERE unique1 IN (VALUES (0), ((2 IN
                ->  Values Scan on "*VALUES*"
                      SubPlan any_1
                        ->  Result
-   ->  Index Scan using onek_unique1 on onek t
-         Index Cond: (unique1 = "*VALUES*".column1)
-(9 rows)
+   ->  Bitmap Heap Scan on onek t
+         Recheck Cond: (unique1 = "*VALUES*".column1)
+         ->  Bitmap Index Scan on onek_unique1
+               Index Cond: (unique1 = "*VALUES*".column1)
+(11 rows)
 
 -- VtA is not allowed with non-constant expressions
 EXPLAIN (COSTS OFF)
@@ -3735,21 +3772,18 @@ WHERE id NOT IN (
     FROM not_null_tab t1
     LEFT JOIN not_null_tab t2 ON t1.id = t2.id
 );
-                     QUERY PLAN                      
------------------------------------------------------
- Hash Anti Join
-   Hash Cond: (not_null_tab.id = t1.id)
-   ->  Seq Scan on not_null_tab
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t1.id = not_null_tab.id)
+   ->  Hash Left Join
+         Hash Cond: (t1.id = t2.id)
+         ->  Seq Scan on not_null_tab t1
+         ->  Hash
+               ->  Seq Scan on not_null_tab t2
    ->  Hash
-         ->  Merge Left Join
-               Merge Cond: (t1.id = t2.id)
-               ->  Sort
-                     Sort Key: t1.id
-                     ->  Seq Scan on not_null_tab t1
-               ->  Sort
-                     Sort Key: t2.id
-                     ->  Seq Scan on not_null_tab t2
-(12 rows)
+         ->  Seq Scan on not_null_tab
+(9 rows)
 
 -- No ANTI JOIN: inner side is defined NOT NULL but is nulled by outer join
 EXPLAIN (COSTS OFF)
@@ -3764,15 +3798,12 @@ WHERE id NOT IN (
  Seq Scan on not_null_tab
    Filter: (NOT (ANY (id = (hashed SubPlan any_1).col1)))
    SubPlan any_1
-     ->  Merge Left Join
-           Merge Cond: (t1.id = t2.id)
-           ->  Sort
-                 Sort Key: t1.id
-                 ->  Seq Scan on not_null_tab t1
-           ->  Sort
-                 Sort Key: t2.id
+     ->  Hash Left Join
+           Hash Cond: (t1.id = t2.id)
+           ->  Seq Scan on not_null_tab t1
+           ->  Hash
                  ->  Seq Scan on not_null_tab t2
-(11 rows)
+(8 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL, inner side is forced nonnullable
 -- by qual clause
@@ -3784,21 +3815,18 @@ WHERE id NOT IN (
     LEFT JOIN not_null_tab t2 ON t1.id = t2.id
     WHERE t2.id IS NOT NULL
 );
-                     QUERY PLAN                      
------------------------------------------------------
- Hash Anti Join
-   Hash Cond: (not_null_tab.id = t2.id)
-   ->  Seq Scan on not_null_tab
+                  QUERY PLAN                   
+-----------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t2.id = not_null_tab.id)
+   ->  Hash Join
+         Hash Cond: (t1.id = t2.id)
+         ->  Seq Scan on not_null_tab t1
+         ->  Hash
+               ->  Seq Scan on not_null_tab t2
    ->  Hash
-         ->  Merge Join
-               Merge Cond: (t1.id = t2.id)
-               ->  Sort
-                     Sort Key: t1.id
-                     ->  Seq Scan on not_null_tab t1
-               ->  Sort
-                     Sort Key: t2.id
-                     ->  Seq Scan on not_null_tab t2
-(12 rows)
+         ->  Seq Scan on not_null_tab
+(9 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL, inner side is forced nonnullable
 -- by qual clause
@@ -3810,22 +3838,19 @@ WHERE id NOT IN (
     LEFT JOIN null_tab t2 ON t1.id = t2.id
     WHERE t1.id IS NOT NULL
 );
-                     QUERY PLAN                     
-----------------------------------------------------
- Hash Anti Join
-   Hash Cond: (not_null_tab.id = t1.id)
-   ->  Seq Scan on not_null_tab
+                  QUERY PLAN                  
+----------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (t1.id = not_null_tab.id)
+   ->  Hash Right Join
+         Hash Cond: (t2.id = t1.id)
+         ->  Seq Scan on null_tab t2
+         ->  Hash
+               ->  Seq Scan on null_tab t1
+                     Filter: (id IS NOT NULL)
    ->  Hash
-         ->  Merge Left Join
-               Merge Cond: (t1.id = t2.id)
-               ->  Sort
-                     Sort Key: t1.id
-                     ->  Seq Scan on null_tab t1
-                           Filter: (id IS NOT NULL)
-               ->  Sort
-                     Sort Key: t2.id
-                     ->  Seq Scan on null_tab t2
-(13 rows)
+         ->  Seq Scan on not_null_tab
+(10 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL, inner side is forced nonnullable
 -- by qual clause
@@ -3839,23 +3864,18 @@ WHERE id NOT IN (
 );
                    QUERY PLAN                    
 -------------------------------------------------
- Merge Anti Join
-   Merge Cond: (not_null_tab.id = t1.id)
-   ->  Sort
-         Sort Key: not_null_tab.id
-         ->  Seq Scan on not_null_tab
+ Hash Right Anti Join
+   Hash Cond: (t1.id = not_null_tab.id)
    ->  Nested Loop Left Join
-         ->  Merge Join
-               Merge Cond: (t1.id = t2.id)
-               ->  Sort
-                     Sort Key: t1.id
-                     ->  Seq Scan on null_tab t1
-               ->  Sort
-                     Sort Key: t2.id
+         ->  Hash Join
+               Hash Cond: (t1.id = t2.id)
+               ->  Seq Scan on null_tab t1
+               ->  Hash
                      ->  Seq Scan on null_tab t2
-         ->  Materialize
-               ->  Seq Scan on null_tab t3
-(16 rows)
+         ->  Seq Scan on null_tab t3
+   ->  Hash
+         ->  Seq Scan on not_null_tab
+(11 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL and is not nulled by outer join,
 -- inner side is defined NOT NULL
@@ -3865,19 +3885,16 @@ LEFT JOIN not_null_tab t2 ON t1.id = t2.id
 WHERE t1.id NOT IN (SELECT id FROM not_null_tab);
                      QUERY PLAN                     
 ----------------------------------------------------
- Merge Left Join
-   Merge Cond: (t1.id = t2.id)
-   ->  Sort
-         Sort Key: t1.id
+ Hash Right Join
+   Hash Cond: (t2.id = t1.id)
+   ->  Seq Scan on not_null_tab t2
+   ->  Hash
          ->  Hash Anti Join
                Hash Cond: (t1.id = not_null_tab.id)
                ->  Seq Scan on not_null_tab t1
                ->  Hash
                      ->  Seq Scan on not_null_tab
-   ->  Sort
-         Sort Key: t2.id
-         ->  Seq Scan on not_null_tab t2
-(12 rows)
+(9 rows)
 
 -- No ANTI JOIN: outer side is nulled by outer join
 EXPLAIN (COSTS OFF)
@@ -3886,18 +3903,15 @@ LEFT JOIN not_null_tab t2 ON t1.id = t2.id
 WHERE t2.id NOT IN (SELECT id FROM not_null_tab);
                          QUERY PLAN                          
 -------------------------------------------------------------
- Merge Left Join
-   Merge Cond: (t1.id = t2.id)
+ Hash Left Join
+   Hash Cond: (t1.id = t2.id)
    Filter: (NOT (ANY (t2.id = (hashed SubPlan any_1).col1)))
-   ->  Sort
-         Sort Key: t1.id
-         ->  Seq Scan on not_null_tab t1
-   ->  Sort
-         Sort Key: t2.id
+   ->  Seq Scan on not_null_tab t1
+   ->  Hash
          ->  Seq Scan on not_null_tab t2
    SubPlan any_1
      ->  Seq Scan on not_null_tab
-(11 rows)
+(8 rows)
 
 -- No ANTI JOIN: sublink is in an outer join's ON qual and references the
 -- non-nullable side
@@ -3910,11 +3924,10 @@ ON t1.id NOT IN (SELECT id FROM not_null_tab);
  Nested Loop Left Join
    Join Filter: (NOT (ANY (t1.id = (hashed SubPlan any_1).col1)))
    ->  Seq Scan on not_null_tab t1
-   ->  Materialize
-         ->  Seq Scan on not_null_tab t2
+   ->  Seq Scan on not_null_tab t2
    SubPlan any_1
      ->  Seq Scan on not_null_tab
-(7 rows)
+(6 rows)
 
 -- ANTI JOIN: outer side is defined NOT NULL and is not nulled by outer join,
 -- inner side is defined NOT NULL
@@ -3938,17 +3951,14 @@ ON t2.id NOT IN (SELECT id FROM not_null_tab);
 EXPLAIN (COSTS OFF)
 SELECT * FROM not_null_tab
 WHERE (id, val) NOT IN (SELECT id, val FROM not_null_tab);
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
- Merge Anti Join
-   Merge Cond: ((not_null_tab.id = not_null_tab_1.id) AND (not_null_tab.val = not_null_tab_1.val))
-   ->  Sort
-         Sort Key: not_null_tab.id, not_null_tab.val
-         ->  Seq Scan on not_null_tab
-   ->  Sort
-         Sort Key: not_null_tab_1.id, not_null_tab_1.val
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Hash Anti Join
+   Hash Cond: ((not_null_tab.id = not_null_tab_1.id) AND (not_null_tab.val = not_null_tab_1.val))
+   ->  Seq Scan on not_null_tab
+   ->  Hash
          ->  Seq Scan on not_null_tab not_null_tab_1
-(8 rows)
+(5 rows)
 
 -- ANTI JOIN: both sides are defined NOT NULL
 EXPLAIN (COSTS OFF)
@@ -3959,9 +3969,8 @@ WHERE NOT (id, val) > ANY (SELECT id, val FROM not_null_tab);
  Nested Loop Anti Join
    Join Filter: (ROW(not_null_tab.id, not_null_tab.val) > ROW(not_null_tab_1.id, not_null_tab_1.val))
    ->  Seq Scan on not_null_tab
-   ->  Materialize
-         ->  Seq Scan on not_null_tab not_null_tab_1
-(5 rows)
+   ->  Seq Scan on not_null_tab not_null_tab_1
+(4 rows)
 
 -- No ANTI JOIN: one column of the outer side is nullable
 EXPLAIN (COSTS OFF)
@@ -3972,11 +3981,10 @@ WHERE (t1.id, t2.id) NOT IN (SELECT id, val FROM not_null_tab);
  Nested Loop
    Join Filter: (NOT (ANY ((t1.id = (hashed SubPlan any_1).col1) AND (t2.id = (hashed SubPlan any_1).col2))))
    ->  Seq Scan on not_null_tab t1
-   ->  Materialize
-         ->  Seq Scan on null_tab t2
+   ->  Seq Scan on null_tab t2
    SubPlan any_1
      ->  Seq Scan on not_null_tab
-(7 rows)
+(6 rows)
 
 -- No ANTI JOIN: one column of the inner side is nullable
 EXPLAIN (COSTS OFF)
@@ -3990,9 +3998,8 @@ WHERE (id, val) NOT IN (SELECT t1.id, t2.id FROM not_null_tab t1, null_tab t2);
      ->  Materialize
            ->  Nested Loop
                  ->  Seq Scan on not_null_tab t1
-                 ->  Materialize
-                       ->  Seq Scan on null_tab t2
-(8 rows)
+                 ->  Seq Scan on null_tab t2
+(7 rows)
 
 -- ANTI JOIN: COALESCE(nullable, constant) is non-nullable
 EXPLAIN (COSTS OFF)

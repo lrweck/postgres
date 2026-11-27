@@ -38,6 +38,7 @@ extern bool relation_excluded_by_constraints(PlannerInfo *root,
 extern List *build_physical_tlist(PlannerInfo *root, RelOptInfo *rel);
 
 extern bool has_unique_index(RelOptInfo *rel, AttrNumber attno);
+extern bool relation_has_unique_key_for(RelOptInfo *rel, List *vars);
 
 extern Selectivity restriction_selectivity(PlannerInfo *root,
 										   Oid operatorid,
@@ -63,6 +64,8 @@ extern Selectivity function_selectivity(PlannerInfo *root,
 
 extern void add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
 							  QualCost *cost);
+extern void add_expr_cost(PlannerInfo *root, Oid funcid, Node *node,
+						  QualCost *cost);
 
 extern double get_function_rows(PlannerInfo *root, Oid funcid, Node *node);
 

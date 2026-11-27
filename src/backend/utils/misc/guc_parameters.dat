@@ -2397,6 +2397,14 @@
   options => 'plan_cache_mode_options',
 },
 
+{ name => 'plan_race_pick', type => 'int', context => 'PGC_SUSET', group => 'QUERY_TUNING_OTHER',
+  short_desc => 'Makes the planner use the Nth candidate path of the top join rel (-1 disables).',
+  variable => 'plan_race_pick',
+  boot_val => '-1',
+  min => '-1',
+  max => '1023',
+},
+
 { name => 'port', type => 'int', context => 'PGC_POSTMASTER', group => 'CONN_AUTH_SETTINGS',
   short_desc => 'Sets the TCP port the server listens on.',
   variable => 'PostPortNumber',
