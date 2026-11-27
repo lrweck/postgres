@@ -3102,8 +3102,8 @@ MERGE INTO rw_view2 t
   USING (VALUES ('Tom'), ('Dick'), ('Harry')) AS v(person) ON t.person = v.person
   WHEN MATCHED AND snoop(t.person) THEN UPDATE SET person = v.person;
 NOTICE:  snooped value: Tom
-NOTICE:  snooped value: Harry
 NOTICE:  snooped value: Tom
+NOTICE:  snooped value: Harry
 NOTICE:  snooped value: Harry
 EXPLAIN (costs off) SELECT * FROM rw_view2 WHERE snoop(person);
                      QUERY PLAN                      
@@ -3136,16 +3136,15 @@ EXPLAIN (costs off)
 MERGE INTO rw_view2 t
   USING (VALUES ('Tom'), ('Dick'), ('Harry')) AS v(person) ON t.person = v.person
   WHEN MATCHED AND snoop(t.person) THEN UPDATE SET person = v.person;
-                                  QUERY PLAN                                   
--------------------------------------------------------------------------------
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
  Merge on base_tbl
-   ->  Hash Join
-         Hash Cond: ("*VALUES*".column1 = base_tbl.person)
+   ->  Nested Loop
+         Join Filter: (base_tbl.person = "*VALUES*".column1)
+         ->  Seq Scan on base_tbl
+               Filter: ((visibility = 'public'::text) AND snoop(person))
          ->  Values Scan on "*VALUES*"
-         ->  Hash
-               ->  Seq Scan on base_tbl
-                     Filter: ((visibility = 'public'::text) AND snoop(person))
-(7 rows)
+(6 rows)
 
 DROP TABLE base_tbl CASCADE;
 NOTICE:  drop cascades to 2 other objects

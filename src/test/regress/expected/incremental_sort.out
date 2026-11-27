@@ -1556,31 +1556,30 @@ set min_parallel_index_scan_size = 0;
 -- Parallel sort below join.
 explain (costs off) select distinct sub.unique1, stringu1
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
  Unique
-   ->  Gather Merge
-         Workers Planned: 2
-         ->  Unique
+   ->  Nested Loop
+         ->  Gather Merge
+               Workers Planned: 2
                ->  Sort
                      Sort Key: tenk1.unique1, tenk1.stringu1
-                     ->  Nested Loop
-                           ->  Parallel Index Scan using tenk1_unique1 on tenk1
-                           ->  Function Scan on generate_series
-(9 rows)
+                     ->  Parallel Index Scan using tenk1_unique1 on tenk1
+         ->  Function Scan on generate_series
+(8 rows)
 
 explain (costs off) select sub.unique1, stringu1
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub
 order by 1, 2;
                              QUERY PLAN                             
 --------------------------------------------------------------------
- Gather Merge
-   Workers Planned: 2
-   ->  Sort
-         Sort Key: tenk1.unique1, tenk1.stringu1
-         ->  Nested Loop
+ Nested Loop
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Sort
+               Sort Key: tenk1.unique1, tenk1.stringu1
                ->  Parallel Index Scan using tenk1_unique1 on tenk1
-               ->  Function Scan on generate_series
+   ->  Function Scan on generate_series
 (7 rows)
 
 -- Parallel sort but with expression that can be safely generated at the base rel.
@@ -1589,28 +1588,27 @@ from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub;
                                        QUERY PLAN                                       
 ----------------------------------------------------------------------------------------
  Unique
-   ->  Gather Merge
-         Workers Planned: 2
-         ->  Unique
+   ->  Nested Loop
+         ->  Gather Merge
+               Workers Planned: 2
                ->  Sort
                      Sort Key: tenk1.unique1, (md5((tenk1.stringu1)::text)) COLLATE "C"
-                     ->  Nested Loop
-                           ->  Parallel Index Scan using tenk1_unique1 on tenk1
-                           ->  Function Scan on generate_series
-(9 rows)
+                     ->  Parallel Index Scan using tenk1_unique1 on tenk1
+         ->  Function Scan on generate_series
+(8 rows)
 
 explain (costs off) select sub.unique1, md5(stringu1)
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub
 order by 1, 2;
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
- Gather Merge
-   Workers Planned: 2
-   ->  Sort
-         Sort Key: tenk1.unique1, (md5((tenk1.stringu1)::text)) COLLATE "C"
-         ->  Nested Loop
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Nested Loop
+   ->  Gather Merge
+         Workers Planned: 2
+         ->  Sort
+               Sort Key: tenk1.unique1, (md5((tenk1.stringu1)::text)) COLLATE "C"
                ->  Parallel Index Scan using tenk1_unique1 on tenk1
-               ->  Function Scan on generate_series
+   ->  Function Scan on generate_series
 (7 rows)
 
 -- Parallel sort with an aggregate that can be safely generated in parallel,

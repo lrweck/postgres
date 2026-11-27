@@ -108,34 +108,34 @@ SELECT relname, d.* FROM d, pg_class where d.tableoid = pg_class.oid;
 SELECT relname, a.* FROM ONLY a, pg_class where a.tableoid = pg_class.oid;
  relname |    aa    
 ---------+----------
- a       | aaaaaaaa
- a       | aaaaaaa
- a       | aaaaaa
- a       | aaaaa
- a       | aaaa
  a       | aaa
+ a       | aaaa
+ a       | aaaaa
+ a       | aaaaaa
+ a       | aaaaaaa
+ a       | aaaaaaaa
 (6 rows)
 
 SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
  relname |    aa    | bb 
 ---------+----------+----
- b       | bbbbbbbb | 
- b       | bbbbbbb  | 
- b       | bbbbbb   | 
- b       | bbbbb    | 
- b       | bbbb     | 
  b       | bbb      | 
+ b       | bbbb     | 
+ b       | bbbbb    | 
+ b       | bbbbbb   | 
+ b       | bbbbbbb  | 
+ b       | bbbbbbbb | 
 (6 rows)
 
 SELECT relname, c.* FROM ONLY c, pg_class where c.tableoid = pg_class.oid;
  relname |    aa    | cc 
 ---------+----------+----
- c       | cccccccc | 
- c       | ccccccc  | 
- c       | cccccc   | 
- c       | ccccc    | 
- c       | cccc     | 
  c       | ccc      | 
+ c       | cccc     | 
+ c       | ccccc    | 
+ c       | cccccc   | 
+ c       | ccccccc  | 
+ c       | cccccccc | 
 (6 rows)
 
 SELECT relname, d.* FROM ONLY d, pg_class where d.tableoid = pg_class.oid;
@@ -231,34 +231,34 @@ SELECT relname, d.* FROM d, pg_class where d.tableoid = pg_class.oid;
 SELECT relname, a.* FROM ONLY a, pg_class where a.tableoid = pg_class.oid;
  relname |   aa   
 ---------+--------
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzz
  a       | zzzz
+ a       | zzzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
 (6 rows)
 
 SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
  relname |    aa    | bb 
 ---------+----------+----
- b       | bbbbbbbb | 
- b       | bbbbbbb  | 
- b       | bbbbbb   | 
- b       | bbbbb    | 
- b       | bbbb     | 
  b       | bbb      | 
+ b       | bbbb     | 
+ b       | bbbbb    | 
+ b       | bbbbbb   | 
+ b       | bbbbbbb  | 
+ b       | bbbbbbbb | 
 (6 rows)
 
 SELECT relname, c.* FROM ONLY c, pg_class where c.tableoid = pg_class.oid;
  relname |    aa    | cc 
 ---------+----------+----
- c       | cccccccc | 
- c       | ccccccc  | 
- c       | cccccc   | 
- c       | ccccc    | 
- c       | cccc     | 
  c       | ccc      | 
+ c       | cccc     | 
+ c       | ccccc    | 
+ c       | cccccc   | 
+ c       | ccccccc  | 
+ c       | cccccccc | 
 (6 rows)
 
 SELECT relname, d.* FROM ONLY d, pg_class where d.tableoid = pg_class.oid;
@@ -350,12 +350,12 @@ SELECT relname, d.* FROM d, pg_class where d.tableoid = pg_class.oid;
 SELECT relname, a.* FROM ONLY a, pg_class where a.tableoid = pg_class.oid;
  relname |   aa   
 ---------+--------
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzzz
- a       | zzzzz
  a       | zzzz
+ a       | zzzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
+ a       | zzzzzz
 (6 rows)
 
 SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
@@ -372,12 +372,12 @@ SELECT relname, b.* FROM ONLY b, pg_class where b.tableoid = pg_class.oid;
 SELECT relname, c.* FROM ONLY c, pg_class where c.tableoid = pg_class.oid;
  relname |    aa    | cc 
 ---------+----------+----
- c       | cccccccc | 
- c       | ccccccc  | 
- c       | cccccc   | 
- c       | ccccc    | 
- c       | cccc     | 
  c       | ccc      | 
+ c       | cccc     | 
+ c       | ccccc    | 
+ c       | cccccc   | 
+ c       | ccccccc  | 
+ c       | cccccccc | 
 (6 rows)
 
 SELECT relname, d.* FROM ONLY d, pg_class where d.tableoid = pg_class.oid;
@@ -3891,28 +3891,26 @@ set session authorization regress_no_child_access;
 explain (costs off)
   select * from permtest_parent p1 inner join permtest_parent p2
   on p1.a = p2.a and p1.c ~ 'a1$';
-                   QUERY PLAN                   
-------------------------------------------------
- Hash Join
-   Hash Cond: (p2.a = p1.a)
+                QUERY PLAN                
+------------------------------------------
+ Nested Loop
+   Join Filter: (p1.a = p2.a)
+   ->  Seq Scan on permtest_grandchild p1
+         Filter: (c ~ 'a1$'::text)
    ->  Seq Scan on permtest_grandchild p2
-   ->  Hash
-         ->  Seq Scan on permtest_grandchild p1
-               Filter: (c ~ 'a1$'::text)
-(6 rows)
+(5 rows)
 
 explain (costs off)
   select * from permtest_parent p1 inner join permtest_parent p2
   on p1.a = p2.a and left(p1.c, 3) ~ 'a1$';
-                     QUERY PLAN                     
-----------------------------------------------------
- Hash Join
-   Hash Cond: (p2.a = p1.a)
+                  QUERY PLAN                  
+----------------------------------------------
+ Nested Loop
+   Join Filter: (p1.a = p2.a)
+   ->  Seq Scan on permtest_grandchild p1
+         Filter: ("left"(c, 3) ~ 'a1$'::text)
    ->  Seq Scan on permtest_grandchild p2
-   ->  Hash
-         ->  Seq Scan on permtest_grandchild p1
-               Filter: ("left"(c, 3) ~ 'a1$'::text)
-(6 rows)
+(5 rows)
 
 reset session authorization;
 revoke all on permtest_parent from regress_no_child_access;
@@ -3921,29 +3919,27 @@ set session authorization regress_no_child_access;
 explain (costs off)
   select p2.a, p1.c from permtest_parent p1 inner join permtest_parent p2
   on p1.a = p2.a and p1.c ~ 'a1$';
-                   QUERY PLAN                   
-------------------------------------------------
- Hash Join
-   Hash Cond: (p2.a = p1.a)
+                QUERY PLAN                
+------------------------------------------
+ Nested Loop
+   Join Filter: (p1.a = p2.a)
+   ->  Seq Scan on permtest_grandchild p1
+         Filter: (c ~ 'a1$'::text)
    ->  Seq Scan on permtest_grandchild p2
-   ->  Hash
-         ->  Seq Scan on permtest_grandchild p1
-               Filter: (c ~ 'a1$'::text)
-(6 rows)
+(5 rows)
 
 -- we will not have access to the expression index's stats here:
 explain (costs off)
   select p2.a, p1.c from permtest_parent p1 inner join permtest_parent p2
   on p1.a = p2.a and left(p1.c, 3) ~ 'a1$';
-                     QUERY PLAN                     
-----------------------------------------------------
- Hash Join
-   Hash Cond: (p2.a = p1.a)
+                  QUERY PLAN                  
+----------------------------------------------
+ Nested Loop
+   Join Filter: (p1.a = p2.a)
+   ->  Seq Scan on permtest_grandchild p1
+         Filter: ("left"(c, 3) ~ 'a1$'::text)
    ->  Seq Scan on permtest_grandchild p2
-   ->  Hash
-         ->  Seq Scan on permtest_grandchild p1
-               Filter: ("left"(c, 3) ~ 'a1$'::text)
-(6 rows)
+(5 rows)
 
 reset session authorization;
 revoke all on permtest_parent from regress_no_child_access;

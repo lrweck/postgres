@@ -2124,17 +2124,16 @@ NOTICE:  f_leak => cde
 EXPLAIN (COSTS OFF) UPDATE t2 t2_1 SET b = t2_2.b FROM t2 t2_2
 WHERE t2_1.a = 3 AND t2_2.a = t2_1.a AND t2_2.b = t2_1.b
 AND f_leak(t2_1.b) AND f_leak(t2_2.b) RETURNING *, t2_1, t2_2;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Update on t2 t2_1
-   ->  Hash Join
-         Hash Cond: (t2_1.b = t2_2.b)
+   ->  Nested Loop
+         Join Filter: (t2_1.b = t2_2.b)
          ->  Seq Scan on t2 t2_1
                Filter: ((a = 3) AND ((a % 2) = 1) AND f_leak(b))
-         ->  Hash
-               ->  Seq Scan on t2 t2_2
-                     Filter: ((a = 3) AND ((a % 2) = 1) AND f_leak(b))
-(8 rows)
+         ->  Seq Scan on t2 t2_2
+               Filter: ((a = 3) AND ((a % 2) = 1) AND f_leak(b))
+(7 rows)
 
 UPDATE t2 t2_1 SET b = t2_2.b FROM t2 t2_2
 WHERE t2_1.a = 3 AND t2_2.a = t2_1.a AND t2_2.b = t2_1.b
@@ -2155,8 +2154,8 @@ AND f_leak(t1_1.b) AND f_leak(t1_2.b) RETURNING *, t1_1, t1_2;
    Update on t1 t1_1_1
    Update on t2 t1_1_2
    Update on t3 t1_1_3
-   ->  Hash Join
-         Hash Cond: (t1_1.b = t1_2.b)
+   ->  Nested Loop
+         Join Filter: (t1_1.b = t1_2.b)
          ->  Append
                ->  Seq Scan on t1 t1_1_1
                      Filter: ((a = 4) AND ((a % 2) = 0) AND f_leak(b))
@@ -2164,7 +2163,7 @@ AND f_leak(t1_1.b) AND f_leak(t1_2.b) RETURNING *, t1_1, t1_2;
                      Filter: ((a = 4) AND ((a % 2) = 0) AND f_leak(b))
                ->  Seq Scan on t3 t1_1_3
                      Filter: ((a = 4) AND ((a % 2) = 0) AND f_leak(b))
-         ->  Hash
+         ->  Materialize
                ->  Append
                      ->  Seq Scan on t1 t1_2_1
                            Filter: ((a = 4) AND ((a % 2) = 0) AND f_leak(b))

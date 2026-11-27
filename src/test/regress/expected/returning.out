@@ -732,17 +732,15 @@ UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
                            Output: joinme.ctid, joinme.other, joinme.f2j
                      ->  Hash
                            Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                           ->  Hash Join
+                           ->  Nested Loop
                                  Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                                 Hash Cond: (foo_1.f2 = foo_2.f2)
+                                 Join Filter: (foo_1.f2 = foo_2.f2)
+                                 ->  Seq Scan on pg_temp.foo foo_2
+                                       Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
+                                       Filter: (foo_2.f3 = 57)
                                  ->  Seq Scan on pg_temp.foo foo_1
                                        Output: foo_1.f2, foo_1.tableoid, foo_1.ctid
-                                 ->  Hash
-                                       Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                                       ->  Seq Scan on pg_temp.foo foo_2
-                                             Output: foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
-                                             Filter: (foo_2.f3 = 57)
-(27 rows)
+(25 rows)
 
 UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
   RETURNING old.*, new.*, *, new.f3 - old.f3 AS delta_f3;

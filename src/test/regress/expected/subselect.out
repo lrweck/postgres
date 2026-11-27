@@ -739,25 +739,33 @@ where (t1.a, t2.a) in (select a, b from semijoin_unique_tbl t3)
 order by t1.a, t2.a;
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Merge Join
+ Nested Loop
    Output: t1.a, t1.b, t2.a, t2.b
-   Merge Cond: (t3.a = t1.a)
    ->  Nested Loop
-         Output: t2.a, t2.b, t3.a
+         Output: t1.a, t1.b, t3.b
          ->  Unique
                Output: t3.a, t3.b
                ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t3
                      Output: t3.a, t3.b
+         ->  Memoize
+               Output: t1.a, t1.b
+               Cache Key: t3.a
+               Cache Mode: logical
+               ->  Bitmap Heap Scan on public.semijoin_unique_tbl t1
+                     Output: t1.a, t1.b
+                     Recheck Cond: (t1.a = t3.a)
+                     ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                           Index Cond: (t1.a = t3.a)
+   ->  Memoize
+         Output: t2.a, t2.b
+         Cache Key: t3.b
+         Cache Mode: logical
          ->  Bitmap Heap Scan on public.semijoin_unique_tbl t2
                Output: t2.a, t2.b
                Recheck Cond: (t2.a = t3.b)
                ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
                      Index Cond: (t2.a = t3.b)
-   ->  Materialize
-         Output: t1.a, t1.b
-         ->  Index Only Scan using semijoin_unique_tbl_a_b_idx on public.semijoin_unique_tbl t1
-               Output: t1.a, t1.b
-(18 rows)
+(26 rows)
 
 -- Ensure that we can unique-ify expressions more complex than plain Vars
 explain (verbose, costs off)
@@ -803,11 +811,10 @@ where (t1.a, t2.a) in (select a, b from semijoin_unique_tbl t3)
 order by t1.a, t2.a;
                                        QUERY PLAN                                       
 ----------------------------------------------------------------------------------------
- Merge Join
+ Nested Loop
    Output: t1.a, t1.b, t2.a, t2.b
-   Merge Cond: (t3.a = t1.a)
    ->  Nested Loop
-         Output: t2.a, t2.b, t3.a
+         Output: t1.a, t1.b, t3.b
          ->  Unique
                Output: t3.a, t3.b
                ->  Gather Merge
@@ -821,25 +828,24 @@ order by t1.a, t2.a;
                                  ->  Parallel Seq Scan on public.semijoin_unique_tbl t3
                                        Output: t3.a, t3.b
          ->  Memoize
-               Output: t2.a, t2.b
-               Cache Key: t3.b
-               Cache Mode: logical
-               ->  Bitmap Heap Scan on public.semijoin_unique_tbl t2
-                     Output: t2.a, t2.b
-                     Recheck Cond: (t2.a = t3.b)
-                     ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
-                           Index Cond: (t2.a = t3.b)
-   ->  Materialize
-         Output: t1.a, t1.b
-         ->  Gather Merge
                Output: t1.a, t1.b
-               Workers Planned: 2
-               ->  Sort
+               Cache Key: t3.a
+               Cache Mode: logical
+               ->  Bitmap Heap Scan on public.semijoin_unique_tbl t1
                      Output: t1.a, t1.b
-                     Sort Key: t1.a
-                     ->  Parallel Seq Scan on public.semijoin_unique_tbl t1
-                           Output: t1.a, t1.b
-(36 rows)
+                     Recheck Cond: (t1.a = t3.a)
+                     ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                           Index Cond: (t1.a = t3.a)
+   ->  Memoize
+         Output: t2.a, t2.b
+         Cache Key: t3.b
+         Cache Mode: logical
+         ->  Bitmap Heap Scan on public.semijoin_unique_tbl t2
+               Output: t2.a, t2.b
+               Recheck Cond: (t2.a = t3.b)
+               ->  Bitmap Index Scan on semijoin_unique_tbl_a_b_idx
+                     Index Cond: (t2.a = t3.b)
+(34 rows)
 
 reset enable_indexscan;
 reset max_parallel_workers_per_gather;
@@ -864,44 +870,69 @@ explain (verbose, costs off)
 select * from unique_tbl_p t1, unique_tbl_p t2
 where (t1.a, t2.a) in (select a, a from unique_tbl_p t3)
 order by t1.a, t2.a;
-                                     QUERY PLAN                                      
--------------------------------------------------------------------------------------
- Merge Join
-   Output: t1.a, t1.b, t2.a, t2.b
-   Merge Cond: (t1.a = t2.a)
-   ->  Merge Join
-         Output: t1.a, t1.b, t3.a
-         Merge Cond: (t1.a = t3.a)
-         ->  Append
-               ->  Index Scan using unique_tbl_p1_a_idx on public.unique_tbl_p1 t1_1
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Merge Append
+   Sort Key: t1.a
+   ->  Nested Loop
+         Output: t1_1.a, t1_1.b, t2_1.a, t2_1.b
+         ->  Nested Loop
+               Output: t1_1.a, t1_1.b, t3_1.a
+               ->  Unique
+                     Output: t3_1.a
+                     ->  Index Only Scan using unique_tbl_p1_a_idx on public.unique_tbl_p1 t3_1
+                           Output: t3_1.a
+               ->  Bitmap Heap Scan on public.unique_tbl_p1 t1_1
                      Output: t1_1.a, t1_1.b
-               ->  Index Scan using unique_tbl_p2_a_idx on public.unique_tbl_p2 t1_2
+                     Recheck Cond: (t1_1.a = t3_1.a)
+                     ->  Bitmap Index Scan on unique_tbl_p1_a_idx
+                           Index Cond: (t1_1.a = t3_1.a)
+         ->  Bitmap Heap Scan on public.unique_tbl_p1 t2_1
+               Output: t2_1.a, t2_1.b
+               Recheck Cond: (t2_1.a = t1_1.a)
+               ->  Bitmap Index Scan on unique_tbl_p1_a_idx
+                     Index Cond: (t2_1.a = t1_1.a)
+   ->  Nested Loop
+         Output: t1_2.a, t1_2.b, t2_2.a, t2_2.b
+         ->  Nested Loop
+               Output: t1_2.a, t1_2.b, t3_2.a
+               ->  Unique
+                     Output: t3_2.a
+                     ->  Index Only Scan using unique_tbl_p2_a_idx on public.unique_tbl_p2 t3_2
+                           Output: t3_2.a
+               ->  Bitmap Heap Scan on public.unique_tbl_p2 t1_2
                      Output: t1_2.a, t1_2.b
-               ->  Index Scan using unique_tbl_p3_a_idx on public.unique_tbl_p3 t1_3
+                     Recheck Cond: (t1_2.a = t3_2.a)
+                     ->  Bitmap Index Scan on unique_tbl_p2_a_idx
+                           Index Cond: (t1_2.a = t3_2.a)
+         ->  Bitmap Heap Scan on public.unique_tbl_p2 t2_2
+               Output: t2_2.a, t2_2.b
+               Recheck Cond: (t2_2.a = t1_2.a)
+               ->  Bitmap Index Scan on unique_tbl_p2_a_idx
+                     Index Cond: (t2_2.a = t1_2.a)
+   ->  Nested Loop
+         Output: t1_3.a, t1_3.b, t2_3.a, t2_3.b
+         ->  Nested Loop
+               Output: t1_3.a, t1_3.b, t3_3.a
+               ->  Unique
+                     Output: t3_3.a
+                     ->  Index Only Scan using unique_tbl_p3_a_idx on public.unique_tbl_p3 t3_3
+                           Output: t3_3.a
+               ->  Bitmap Heap Scan on public.unique_tbl_p3 t1_3
                      Output: t1_3.a, t1_3.b
-         ->  Sort
-               Output: t3.a
-               Sort Key: t3.a
-               ->  HashAggregate
-                     Output: t3.a
-                     Group Key: t3.a
-                     ->  Append
-                           ->  Seq Scan on public.unique_tbl_p1 t3_1
-                                 Output: t3_1.a
-                           ->  Seq Scan on public.unique_tbl_p2 t3_2
-                                 Output: t3_2.a
-                           ->  Seq Scan on public.unique_tbl_p3 t3_3
-                                 Output: t3_3.a
-   ->  Materialize
-         Output: t2.a, t2.b
-         ->  Append
-               ->  Index Scan using unique_tbl_p1_a_idx on public.unique_tbl_p1 t2_1
-                     Output: t2_1.a, t2_1.b
-               ->  Index Scan using unique_tbl_p2_a_idx on public.unique_tbl_p2 t2_2
-                     Output: t2_2.a, t2_2.b
-               ->  Index Scan using unique_tbl_p3_a_idx on public.unique_tbl_p3 t2_3
+                     Recheck Cond: (t1_3.a = t3_3.a)
+                     ->  Bitmap Index Scan on unique_tbl_p3_a_idx
+                           Index Cond: (t1_3.a = t3_3.a)
+         ->  Memoize
+               Output: t2_3.a, t2_3.b
+               Cache Key: t1_3.a
+               Cache Mode: logical
+               ->  Bitmap Heap Scan on public.unique_tbl_p3 t2_3
                      Output: t2_3.a, t2_3.b
-(35 rows)
+                     Recheck Cond: (t2_3.a = t1_3.a)
+                     ->  Bitmap Index Scan on unique_tbl_p3_a_idx
+                           Index Cond: (t2_3.a = t1_3.a)
+(60 rows)
 
 reset enable_partitionwise_join;
 drop table unique_tbl_p;
@@ -1754,19 +1785,17 @@ select * from int4_tbl where
   (select ten from tenk1 b);
                                                                                       QUERY PLAN                                                                                       
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Right Semi Join
+ Nested Loop Semi Join
    Output: int4_tbl.f1
-   Hash Cond: (b.ten = CASE WHEN (ANY (int4_tbl.f1 = (hashed SubPlan any_1).col1)) THEN int4_tbl.f1 ELSE NULL::integer END)
+   Join Filter: (CASE WHEN (ANY (int4_tbl.f1 = (hashed SubPlan any_1).col1)) THEN int4_tbl.f1 ELSE NULL::integer END = b.ten)
+   ->  Seq Scan on public.int4_tbl
+         Output: int4_tbl.f1
    ->  Seq Scan on public.tenk1 b
          Output: b.unique1, b.unique2, b.two, b.four, b.ten, b.twenty, b.hundred, b.thousand, b.twothousand, b.fivethous, b.tenthous, b.odd, b.even, b.stringu1, b.stringu2, b.string4
-   ->  Hash
-         Output: int4_tbl.f1
-         ->  Seq Scan on public.int4_tbl
-               Output: int4_tbl.f1
-         SubPlan any_1
-           ->  Seq Scan on public.tenk1 a
-                 Output: a.unique1
-(12 rows)
+   SubPlan any_1
+     ->  Seq Scan on public.tenk1 a
+           Output: a.unique1
+(10 rows)
 
 select * from int4_tbl where
   (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
@@ -1784,12 +1813,10 @@ select * from int4_tbl o where (f1, f1) in
   (select f1, generate_series(1,50) / 10 g from int4_tbl i group by f1);
                                QUERY PLAN                                
 -------------------------------------------------------------------------
- Hash Semi Join
+ Nested Loop
    Output: o.f1
-   Hash Cond: (o.f1 = unnamed_subquery.f1)
-   ->  Seq Scan on public.int4_tbl o
-         Output: o.f1
-   ->  Hash
+   Join Filter: (o.f1 = unnamed_subquery.f1)
+   ->  Unique
          Output: unnamed_subquery.f1, unnamed_subquery.g
          ->  Subquery Scan on unnamed_subquery
                Output: unnamed_subquery.f1, unnamed_subquery.g
@@ -1806,6 +1833,8 @@ select * from int4_tbl o where (f1, f1) in
                                        Sort Key: i.f1
                                        ->  Seq Scan on public.int4_tbl i
                                              Output: i.f1
+   ->  Seq Scan on public.int4_tbl o
+         Output: o.f1
 (22 rows)
 
 select * from int4_tbl o where (f1, f1) in

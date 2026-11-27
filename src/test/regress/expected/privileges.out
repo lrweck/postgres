@@ -525,11 +525,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest12 x, atest12 y
 EXPLAIN (COSTS OFF) SELECT * FROM atest12sbv x, atest12sbv y WHERE x.a = y.b;
                 QUERY PLAN                 
 -------------------------------------------
- Hash Join
-   Hash Cond: (atest12.a = atest12_1.b)
+ Nested Loop
+   Join Filter: (atest12.a = atest12_1.b)
    ->  Seq Scan on atest12
          Filter: (b <<< 5)
-   ->  Hash
+   ->  Materialize
          ->  Seq Scan on atest12 atest12_1
                Filter: (b <<< 5)
 (7 rows)
@@ -571,11 +571,11 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest12v x, atest12v y WHERE x.a = y.b;
 EXPLAIN (COSTS OFF) SELECT * FROM atest12sbv x, atest12sbv y WHERE x.a = y.b;
                 QUERY PLAN                 
 -------------------------------------------
- Hash Join
-   Hash Cond: (atest12.a = atest12_1.b)
+ Nested Loop
+   Join Filter: (atest12.a = atest12_1.b)
    ->  Seq Scan on atest12
          Filter: (b <<< 5)
-   ->  Hash
+   ->  Materialize
          ->  Seq Scan on atest12 atest12_1
                Filter: (b <<< 5)
 (7 rows)
@@ -598,18 +598,17 @@ EXPLAIN (COSTS OFF) SELECT * FROM atest12v x, atest12v y
 -- But a security barrier view isolates the leaky operator.
 EXPLAIN (COSTS OFF) SELECT * FROM atest12sbv x, atest12sbv y
   WHERE x.a = y.b and abs(y.a) <<< 5;
-                   QUERY PLAN                    
--------------------------------------------------
- Hash Join
-   Hash Cond: (atest12.a = y.b)
-   ->  Seq Scan on atest12
+             QUERY PLAN              
+-------------------------------------
+ Nested Loop
+   Join Filter: (atest12_1.a = y.b)
+   ->  Subquery Scan on y
+         Filter: (abs(y.a) <<< 5)
+         ->  Seq Scan on atest12
+               Filter: (b <<< 5)
+   ->  Seq Scan on atest12 atest12_1
          Filter: (b <<< 5)
-   ->  Hash
-         ->  Subquery Scan on y
-               Filter: (abs(y.a) <<< 5)
-               ->  Seq Scan on atest12 atest12_1
-                     Filter: (b <<< 5)
-(9 rows)
+(8 rows)
 
 -- Now regress_priv_user1 grants sufficient access to regress_priv_user2.
 SET SESSION AUTHORIZATION regress_priv_user1;

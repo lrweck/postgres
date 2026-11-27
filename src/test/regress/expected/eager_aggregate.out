@@ -594,19 +594,17 @@ GROUP BY s1.a;
  Finalize HashAggregate
    Output: s1.a, sum(s2.c)
    Group Key: s1.a
-   ->  Hash Join
+   ->  Nested Loop
          Output: s1.a, (PARTIAL sum(s2.c))
-         Hash Cond: (s2.b = s1.a)
+         Join Filter: (s1.a = s2.b)
+         ->  Seq Scan on public.eager_agg_s1 s1
+               Output: s1.a
          ->  Partial HashAggregate
                Output: s2.b, PARTIAL sum(s2.c)
                Group Key: s2.b
                ->  Seq Scan on public.eager_agg_s2 s2
                      Output: s2.b, s2.c
-         ->  Hash
-               Output: s1.a
-               ->  Seq Scan on public.eager_agg_s1 s1
-                     Output: s1.a
-(15 rows)
+(13 rows)
 
 SELECT s1.a, sum(s2.c)
   FROM eager_agg_s1 s1

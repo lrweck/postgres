@@ -79,7 +79,14 @@
  */
 #define COST_ROW_SCAN    0.011
 #define COST_ROW_JOIN    0.5
-#define COST_ROW_JOIN_NL    11.0
+/*
+ * A nestloop join tuple costs one comparison plus whatever the executor does
+ * per pair; fetching the inner tuple is charged separately, per rescan.  The
+ * audit of this machine's plans gives 0.202 units per join row over 140
+ * nestloop nodes, so the old 11 was 55 times the work it priced and made a
+ * nestloop look unaffordable even when its inner is a one-row index probe.
+ */
+#define COST_ROW_JOIN_NL    0.2
 #define COST_ROW_JOIN_HASH  0.21
 #define COST_ROW_JOIN_MERGE 0.97
 #define COST_ROW_AGG     5.5

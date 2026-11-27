@@ -336,10 +336,10 @@ SELECT * FROM pred_tab t1
    ->  Materialize
          ->  Nested Loop Left Join
                Join Filter: (t3.b IS NOT NULL)
-               ->  Hash Left Join
-                     Hash Cond: (t2.a = t3.a)
+               ->  Nested Loop Left Join
+                     Join Filter: (t2.a = t3.a)
                      ->  Seq Scan on pred_tab t2
-                     ->  Hash
+                     ->  Materialize
                            ->  Seq Scan on pred_tab_notnull t3
                ->  Materialize
                      ->  Seq Scan on pred_tab t4
@@ -372,10 +372,10 @@ SELECT * FROM pred_tab t1
    ->  Materialize
          ->  Nested Loop Left Join
                Join Filter: ((t3.b IS NULL) AND (t3.a IS NOT NULL))
-               ->  Hash Left Join
-                     Hash Cond: (t2.a = t3.a)
+               ->  Nested Loop Left Join
+                     Join Filter: (t2.a = t3.a)
                      ->  Seq Scan on pred_tab t2
-                     ->  Hash
+                     ->  Materialize
                            ->  Seq Scan on pred_tab_notnull t3
                ->  Materialize
                      ->  Seq Scan on pred_tab t4

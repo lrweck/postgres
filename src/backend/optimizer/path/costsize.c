@@ -1133,8 +1133,18 @@ cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 	else
 		path->rows = baserel->rows;
 
+	/*
+	 * A parameterized bitmap scan is probed once per outer row and each probe
+	 * reads the heap pages its own tuples live on.  compute_bitmap_pages()
+	 * divides the pages it expects to touch by loop_count, which assumes the
+	 * table stays cached between probes; measured on TPC-H q7, each probe
+	 * reads 3.4 heap pages while that estimate gives 0.17, so a nestloop over
+	 * a bitmap inner looked an order of magnitude cheaper than it runs.  Keep
+	 * the sharing assumption only for the non-parameterized case.
+	 */
 	pages_fetched = compute_bitmap_pages(root, baserel, bitmapqual,
-										 loop_count, &indexTotalCost,
+										 param_info ? 1.0 : loop_count,
+										 &indexTotalCost,
 										 &tuples_fetched);
 
 	startup_cost += indexTotalCost;
@@ -5791,7 +5801,23 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 		 */
 		if (jselec > 0)			/* protect against zero divide */
 		{
-			avgmatch = nselec * innerrel->rows / jselec;
+			double		inner_rows = innerrel->rows;
+
+			/*
+			 * The inner rel's "rows" can be smaller than its tuple count: for
+			 * an IN/ANY sublink the planner caps it at the number of distinct
+			 * values, since only distinct values can match.  That cap turns
+			 * match_count into a count of values, not of rows: a CTE with
+			 * 7,131,438 rows and 58,055 distinct order numbers matches an
+			 * average outer row 123 times, not once.  With the capped value
+			 * the early-exit credit collapses to nothing, and a semi join that
+			 * reads a handful of rows is priced as if it scanned the whole
+			 * store.  Count rows when more rows than distinct values exist.
+			 */
+			if (innerrel->tuples > inner_rows)
+				inner_rows = innerrel->tuples;
+
+			avgmatch = nselec * inner_rows / jselec;
 			/* Clamp to sane range */
 			avgmatch = Max(1.0, avgmatch);
 		}
