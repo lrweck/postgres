@@ -79,6 +79,13 @@
 
 #define COST_ROW_INDEX   0.5
 #define COST_ROW_CTE     2.78
+/*
+ * A CTE scan copies each tuple out of the tuplestore, so its cost follows
+ * the tuple width.  Measured: 0.29 units/row for a 12-byte row, 2.8 for a
+ * ~100-byte one -- a flat per-row charge overprices narrow CTEs by an order
+ * of magnitude and makes the planner materialise stores it could stop early.
+ */
+#define COST_CTE_BYTE    0.028
 #define COST_ROW_SETOP   14.9
 #define COST_OP_INDEX    0.0025                      /* index qual per probed tuple */
 #define COST_OP_DESCENT  0.0025                      /* btree descent, fixed per probe */
