@@ -3949,15 +3949,14 @@ where t1 is null;
 explain (costs off)
 select * from tenk1 t1 left join tbl_wr t2 on t1.unique1 = t2.b
 where t2 is not null;
-             QUERY PLAN             
-------------------------------------
- Hash Join
-   Hash Cond: (t2.b = t1.unique1)
+                    QUERY PLAN                    
+--------------------------------------------------
+ Nested Loop
    ->  Seq Scan on tbl_wr t2
          Filter: (t2.* IS NOT NULL)
-   ->  Hash
-         ->  Seq Scan on tenk1 t1
-(6 rows)
+   ->  Index Scan using tenk1_unique1 on tenk1 t1
+         Index Cond: (unique1 = t2.b)
+(5 rows)
 
 -- reduced to a left join
 explain (costs off)
@@ -7877,18 +7876,17 @@ explain (costs off)
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
   where (b.unique2, random() > 0) = any (select q1, random() > 0 from int8_tbl c where c.q1 < b.unique1);
-                                                           QUERY PLAN                                                           
---------------------------------------------------------------------------------------------------------------------------------
- Hash Join
-   Hash Cond: (a.unique1 = b.unique2)
-   ->  Seq Scan on onek a
-   ->  Hash
-         ->  Seq Scan on onek b
-               Filter: (ANY ((unique2 = (SubPlan any_1).col1) AND ((random() > '0'::double precision) = (SubPlan any_1).col2)))
-               SubPlan any_1
-                 ->  Seq Scan on int8_tbl c
-                       Filter: (q1 < b.unique1)
-(9 rows)
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on onek b
+         Filter: (ANY ((unique2 = (SubPlan any_1).col1) AND ((random() > '0'::double precision) = (SubPlan any_1).col2)))
+         SubPlan any_1
+           ->  Seq Scan on int8_tbl c
+                 Filter: (q1 < b.unique1)
+   ->  Index Only Scan using onek_unique1 on onek a
+         Index Cond: (unique1 = b.unique2)
+(8 rows)
 
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
@@ -13055,23 +13053,23 @@ from onek t1, tenk1 t2
 where exists (select 1 from j3
               where j3.unique1 = t1.unique1 and j3.tenthous = t2.hundred)
       and t1.unique1 < 1;
-                                                                                              QUERY PLAN                                                                                               
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Nested Loop
    Output: t1.unique1, t2.hundred
-   Hash Cond: (t2.hundred = j3.tenthous)
-   ->  Seq Scan on public.tenk1 t2
-         Output: t2.unique1, t2.unique2, t2.two, t2.four, t2.ten, t2.twenty, t2.hundred, t2.thousand, t2.twothousand, t2.fivethous, t2.tenthous, t2.odd, t2.even, t2.stringu1, t2.stringu2, t2.string4
-   ->  Hash
+   ->  Nested Loop
          Output: t1.unique1, j3.tenthous
-         ->  Nested Loop
-               Output: t1.unique1, j3.tenthous
-               ->  Index Only Scan using onek_unique1 on public.onek t1
-                     Output: t1.unique1
-                     Index Cond: (t1.unique1 < 1)
-               ->  Index Only Scan using j3_unique1_tenthous_idx on public.j3
-                     Output: j3.unique1, j3.tenthous
+         ->  Index Only Scan using onek_unique1 on public.onek t1
+               Output: t1.unique1
+               Index Cond: (t1.unique1 < 1)
+         ->  Bitmap Heap Scan on public.j3
+               Output: j3.unique1, j3.tenthous
+               Recheck Cond: (t1.unique1 = j3.unique1)
+               ->  Bitmap Index Scan on j3_unique1_tenthous_idx
                      Index Cond: (j3.unique1 = t1.unique1)
+   ->  Index Only Scan using tenk1_hundred on public.tenk1 t2
+         Output: t2.hundred
+         Index Cond: (t2.hundred = j3.tenthous)
 (15 rows)
 
 drop table j3;

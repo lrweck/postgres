@@ -2281,8 +2281,8 @@ EXPLAIN (COSTS OFF)
 SELECT t1.x COLLATE "C", t2.x COLLATE "C", count(*) FROM test_memoize_ci t1
   INNER JOIN test_memoize_ci_inner t2 ON t2.x === t1.x
 GROUP BY 1, 2 ORDER BY 1, 2;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Sort
    Sort Key: ((t1.x)::text) COLLATE "C", ((t2.x)::text) COLLATE "C"
    ->  HashAggregate
@@ -2290,12 +2290,9 @@ GROUP BY 1, 2 ORDER BY 1, 2;
          ->  Nested Loop
                ->  Seq Scan on test_memoize_ci t1
                      Disabled: true
-               ->  Memoize
-                     Cache Key: t1.x
-                     Cache Mode: logical
-                     ->  Index Scan using test_memoize_ci_inner_x_idx on test_memoize_ci_inner t2
-                           Index Cond: (x === t1.x)
-(12 rows)
+               ->  Index Scan using test_memoize_ci_inner_x_idx on test_memoize_ci_inner t2
+                     Index Cond: (x === t1.x)
+(9 rows)
 
 -- Ensure we get the expected results
 SELECT t1.x COLLATE "C", t2.x COLLATE "C", count(*) FROM test_memoize_ci t1

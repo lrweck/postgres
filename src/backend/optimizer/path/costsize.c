@@ -3758,6 +3758,32 @@ initial_cost_nestloop(PlannerInfo *root, JoinCostWorkspace *workspace,
 }
 
 /*
+ * path_streams_from_cte
+ *	  Does this path start producing rows by pulling from a CTE scan?
+ *
+ * A CTE is a lazy producer: the tuplestore is filled as the consumer pulls.
+ * The property survives a join that streams its first input, so a semi-join
+ * probe into Hash Join(CTE Scan, hash) reads only as many CTE rows as it
+ * needs, exactly like a bare CTE Scan.  It does not survive a node that has
+ * to consume its whole input before emitting anything, such as a sort or a
+ * materialize, nor a hash table built on the CTE side.
+ */
+static bool
+path_streams_from_cte(Path *path)
+{
+	switch (path->pathtype)
+	{
+		case T_CteScan:
+			return true;
+		case T_HashJoin:
+			/* the hash side is built first, the outer side streams */
+			return path_streams_from_cte(((JoinPath *) path)->outerjoinpath);
+		default:
+			return false;
+	}
+}
+
+/*
  * final_cost_nestloop
  *	  Final estimate of the cost and result size of a nestloop join path.
  *
@@ -3829,7 +3855,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 		 * early: measured on TPC-DS q95, the same query runs in 0.11 s when the
 		 * CTE is pulled lazily and 3.1 s when it is materialised completely.
 		 */
-		if (inner_path->pathtype == T_CteScan)
+		if (path_streams_from_cte(inner_path))
 			tuplestore_inner = true;
 
 		/*
@@ -3945,8 +3971,31 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 	/* CPU costs */
 	cost_qual_eval(&restrict_qual_cost, path->jpath.joinrestrictinfo, root);
 	startup_cost += restrict_qual_cost.startup;
-	cpu_per_tuple = (tuplestore_inner ? COST_ROW_SCAN : COST_ROW_JOIN_NL) +
-		restrict_qual_cost.per_tuple;
+
+	/*
+	 * The per-tuple charge covers the join comparison plus the executor's
+	 * per-pair bookkeeping.  When the inner tuple comes from a parameterized
+	 * index, fetching it is already paid for in inner_rescan_run_cost, so the
+	 * only work left here is the comparison itself.  Charging the full
+	 * inner-traversal price on top of a probe counts the probe twice: measured
+	 * on TPC-DS q36, 177,848 probes of a memoized single-row inner take 98 ms,
+	 * that is 0.57 units per probe, where the model charged 11.
+	 *
+	 * This holds for a plain index probe, which fetches one heap tuple per
+	 * match.  A bitmap heap scan is a set read: it is built with a large
+	 * loop_count, so compute_bitmap_pages() divides the heap pages it expects
+	 * to touch by the number of loops and assumes the rest stay cached.  That
+	 * assumption fails when the heap is larger than the cache and each loop
+	 * reads different pages (measured on TPC-H q7: 3.4 heap pages per probe
+	 * against an estimate of 0.17), so a bitmap inner keeps the full price.
+	 */
+	if (has_indexed_join_quals(path) &&
+		(inner_path->pathtype == T_IndexScan ||
+		 inner_path->pathtype == T_IndexOnlyScan))
+		cpu_per_tuple = COST_OP_JOIN + restrict_qual_cost.per_tuple;
+	else
+		cpu_per_tuple = (tuplestore_inner ? COST_ROW_SCAN : COST_ROW_JOIN_NL) +
+			restrict_qual_cost.per_tuple;
 	run_cost += cpu_per_tuple * ntuples;
 
 	/* tlist eval costs are paid per output row, not per tuple scanned */
