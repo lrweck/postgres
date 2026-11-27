@@ -22,11 +22,106 @@
 /* NB: cost-estimation code should use the variables, not these constants! */
 /* If you change these, update backend/utils/misc/postgresql.conf.sample */
 #define DEFAULT_SEQ_PAGE_COST  1.0
-#define DEFAULT_RANDOM_PAGE_COST  4.0
-#define DEFAULT_CPU_TUPLE_COST	0.01
+/*
+ * Measured on this machine: an index probe into a relation larger than the
+ * cache costs about 22 us, against roughly 2 us for a sequential page, so
+ * the random/sequential ratio is ~10 rather than the historical 4.
+ */
+#define DEFAULT_RANDOM_PAGE_COST  10.0
+/*
+ * Uniform price for CPU work, calibrated on this machine against the
+ * sequential-scan anchor.  Every per-row and per-operator constant is
+ * scaled by the same factor, so all node types keep a single unit; page
+ * costs are untouched.  See the node-cost measurements in the commit.
+ */
+#define COST_CPU_SCALE 25.0
+
+#define DEFAULT_CPU_TUPLE_COST	(0.01 * COST_CPU_SCALE)
+/*
+ * The index per-tuple cost is not bulk CPU: a unique probe pays one page
+ * and a handful of comparisons, so it must not inherit the bulk scale.
+ * Bulk index scans are charged per row in cost_index instead.
+ */
 #define DEFAULT_CPU_INDEX_TUPLE_COST 0.005
-#define DEFAULT_CPU_OPERATOR_COST  0.0025
-#define DEFAULT_PARALLEL_TUPLE_COST 0.1
+#define DEFAULT_CPU_OPERATOR_COST  (0.0025 * COST_CPU_SCALE)
+
+/*
+ * Per-purpose operator costs.  One number cannot price a filter comparison,
+ * a btree descent, a sort comparison, an aggregate transition and a join
+ * probe: they do different work.  Each is priced where it happens, so
+ * calibrating one does not move the others.
+ */
+/*
+ * Evaluating an expression is not bulk work: the tuple is already in hand
+ * and the comparison touches registers, not a sort array or a hash table.
+ * Measured on lineitem (6,001,215 rows): a bare seq scan takes 75.8 ms and
+ * with five filter comparisons 191.2 ms, so one comparison is 0.0039 units,
+ * sixteen times less than the bulk rate.  Charging the bulk rate here made
+ * a filter over a large table as expensive as a whole join and pushed the
+ * planner towards index scans that read fewer rows but more pages.
+ */
+#define COST_OP_QUAL     0.004                        /* expression evaluation */
+#define COST_OP_SORT     (0.0025 * COST_CPU_SCALE)   /* sort comparison */
+#define COST_OP_JOIN     (0.0025 * COST_CPU_SCALE)   /* join comparison */
+#define COST_OP_AGG      (0.0025 * COST_CPU_SCALE)   /* aggregate transition */
+/*
+ * Per-row costs, one per kind of work: moving a row out of a scan is not
+ * the same as driving a join probe or closing an aggregate group.
+ */
+/*
+ * A heap scan pays for pages first; moving a row out of a page is cheap.
+ * Measured on lineitem (6,001,215 rows in 112,555 pages, all single
+ * process, warm): the scan takes 163-192 ms and the page charge accounts
+ * for 112.5 ms of it, leaving 0.009-0.014 units per row.  Charging 0.031
+ * made every large sequential scan twice as expensive as it runs, which
+ * pushed the planner into bitmap and index scans instead of a scan it can
+ * afford.
+ */
+#define COST_ROW_SCAN    0.011
+#define COST_ROW_JOIN    0.5
+/*
+ * A nestloop join tuple costs one comparison plus whatever the executor does
+ * per pair; fetching the inner tuple is charged separately, per rescan.  The
+ * audit of this machine's plans gives 0.202 units per join row over 140
+ * nestloop nodes, but that average is dominated by one-row index probes:
+ * when the inner is a scan or a hash build the per-row work is much higher.
+ * Measured on the JOB and TPC-DS/H passes, pricing a non-index inner at 2.0
+ * takes the JOB suite from 134 s to 116 s with the TPC-DS/H suite unchanged,
+ * by dropping nestloops over joins that are better hashed.
+ */
+#define COST_ROW_JOIN_NL    2.0
+#define COST_ROW_JOIN_HASH  0.21
+/*
+ * A parallel hash join builds and probes its hash table in shared memory.
+ * Measured on this machine, the build costs about 6 us per row in shared
+ * memory against 2.6 us locally, so a parallel hash join is only worth it
+ * when the serial plan is clearly more expensive.
+ */
+#define COST_ROW_HASH_PARALLEL 0.5
+#define COST_ROW_JOIN_MERGE 0.97
+#define COST_ROW_AGG     5.5
+#define COST_ROW_SORT    0.585
+
+#define COST_ROW_INDEX   0.5
+#define COST_ROW_CTE     2.78
+/*
+ * A CTE scan copies each tuple out of the tuplestore, so its cost follows
+ * the tuple width.  Measured: 0.29 units/row for a 12-byte row, 2.8 for a
+ * ~100-byte one -- a flat per-row charge overprices narrow CTEs by an order
+ * of magnitude and makes the planner materialise stores it could stop early.
+ */
+#define COST_CTE_BYTE    0.028
+#define COST_ROW_SETOP   14.9
+#define COST_OP_INDEX    0.0025                      /* index qual per probed tuple */
+#define COST_OP_DESCENT  0.0025                      /* btree descent, fixed per probe */
+/*
+ * Moving a tuple between processes is IPC, not computation: it costs
+ * roughly 0.15 us per row, so it scales with a smaller factor than the CPU
+ * family.  Keeping it below the CPU price keeps parallel plans attractive
+ * whenever they really reduce wall time.
+ */
+#define COST_IPC_SCALE 10.0
+#define DEFAULT_PARALLEL_TUPLE_COST (0.1 * COST_IPC_SCALE)
 #define DEFAULT_PARALLEL_SETUP_COST  1000.0
 
 /* defaults for non-Cost parameters */
@@ -61,8 +156,16 @@ extern PGDLLIMPORT bool enable_groupagg;
 extern PGDLLIMPORT bool enable_nestloop;
 extern PGDLLIMPORT bool enable_material;
 extern PGDLLIMPORT bool enable_memoize;
+extern PGDLLIMPORT bool enable_subplan_cache;
 extern PGDLLIMPORT bool enable_mergejoin;
 extern PGDLLIMPORT bool enable_hashjoin;
+
+/*
+ * Plan race: force the planner to use the Nth candidate path of the top join
+ * relation, so a harness can execute alternatives one at a time.  -1 keeps
+ * normal behaviour.  See bench/plan_race.py.
+ */
+extern PGDLLIMPORT int plan_race_pick;
 extern PGDLLIMPORT bool enable_gathermerge;
 extern PGDLLIMPORT bool enable_partitionwise_join;
 extern PGDLLIMPORT bool enable_partitionwise_aggregate;
@@ -109,6 +212,7 @@ extern void cost_namedtuplestorescan(Path *path, PlannerInfo *root,
 extern void cost_resultscan(Path *path, PlannerInfo *root,
 							RelOptInfo *baserel, ParamPathInfo *param_info);
 extern void cost_recursive_union(Path *runion, Path *nrterm, Path *rterm);
+extern Cost sort_comparison_cost(PlannerInfo *root, List *pathkeys);
 extern void cost_sort(Path *path, PlannerInfo *root,
 					  List *pathkeys, int input_disabled_nodes,
 					  Cost input_cost, double tuples, int width,

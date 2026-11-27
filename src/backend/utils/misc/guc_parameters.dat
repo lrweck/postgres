@@ -1047,6 +1047,12 @@
   variable => 'enable_sort',
   boot_val => 'true',
 },
+{ name => 'enable_subplan_cache', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables caching of correlated subplan results.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_subplan_cache',
+  boot_val => 'true',
+},
 
 { name => 'enable_tidscan', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of TID scan plans.',
@@ -2395,6 +2401,14 @@
   variable => 'plan_cache_mode',
   boot_val => 'PLAN_CACHE_MODE_AUTO',
   options => 'plan_cache_mode_options',
+},
+
+{ name => 'plan_race_pick', type => 'int', context => 'PGC_SUSET', group => 'QUERY_TUNING_OTHER',
+  short_desc => 'Makes the planner use the Nth candidate path of the top join rel (-1 disables).',
+  variable => 'plan_race_pick',
+  boot_val => '-1',
+  min => '-1',
+  max => '1023',
 },
 
 { name => 'port', type => 'int', context => 'PGC_POSTMASTER', group => 'CONN_AUTH_SETTINGS',

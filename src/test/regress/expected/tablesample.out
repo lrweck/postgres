@@ -288,10 +288,10 @@ select pct, count(unique1) from
   group by pct order by pct;
                            QUERY PLAN                           
 ----------------------------------------------------------------
- GroupAggregate
-   Group Key: (COALESCE((0), (100)))
-   ->  Sort
-         Sort Key: (COALESCE((0), (100)))
+ Sort
+   Sort Key: (COALESCE((0), (100)))
+   ->  HashAggregate
+         Group Key: COALESCE((0), (100))
          ->  Nested Loop
                ->  Hash Full Join
                      Hash Cond: ((0) = (100))

@@ -2587,80 +2587,76 @@ set parallel_tuple_cost = 0;
 set min_parallel_table_scan_size = 0;
 set max_parallel_workers_per_gather = 2;
 select explain_parallel_append('execute ab_q4 (2, 2)');
-                              explain_parallel_append                               
-------------------------------------------------------------------------------------
- Finalize Aggregate (actual rows=N loops=N)
+                           explain_parallel_append                            
+------------------------------------------------------------------------------
+ Aggregate (actual rows=N loops=N)
    ->  Gather (actual rows=N loops=N)
          Workers Planned: 2
          Workers Launched: N
-         ->  Partial Aggregate (actual rows=N loops=N)
-               ->  Parallel Append (actual rows=N loops=N)
-                     Subplans Removed: 6
-                     ->  Parallel Seq Scan on ab_a2_b1 ab_1 (actual rows=N loops=N)
-                           Filter: ((a >= $1) AND (a <= $2) AND (b < 4))
-                     ->  Parallel Seq Scan on ab_a2_b2 ab_2 (actual rows=N loops=N)
-                           Filter: ((a >= $1) AND (a <= $2) AND (b < 4))
-                     ->  Parallel Seq Scan on ab_a2_b3 ab_3 (actual rows=N loops=N)
-                           Filter: ((a >= $1) AND (a <= $2) AND (b < 4))
-(13 rows)
+         ->  Parallel Append (actual rows=N loops=N)
+               Subplans Removed: 6
+               ->  Parallel Seq Scan on ab_a2_b1 ab_1 (actual rows=N loops=N)
+                     Filter: ((a >= $1) AND (a <= $2) AND (b < 4))
+               ->  Parallel Seq Scan on ab_a2_b2 ab_2 (actual rows=N loops=N)
+                     Filter: ((a >= $1) AND (a <= $2) AND (b < 4))
+               ->  Parallel Seq Scan on ab_a2_b3 ab_3 (actual rows=N loops=N)
+                     Filter: ((a >= $1) AND (a <= $2) AND (b < 4))
+(12 rows)
 
 -- Test run-time pruning with IN lists.
 prepare ab_q5 (int, int, int) as
 select avg(a) from ab where a in($1,$2,$3) and b < 4;
 select explain_parallel_append('execute ab_q5 (1, 1, 1)');
-                              explain_parallel_append                               
-------------------------------------------------------------------------------------
- Finalize Aggregate (actual rows=N loops=N)
+                           explain_parallel_append                            
+------------------------------------------------------------------------------
+ Aggregate (actual rows=N loops=N)
    ->  Gather (actual rows=N loops=N)
          Workers Planned: 2
          Workers Launched: N
-         ->  Partial Aggregate (actual rows=N loops=N)
-               ->  Parallel Append (actual rows=N loops=N)
-                     Subplans Removed: 6
-                     ->  Parallel Seq Scan on ab_a1_b1 ab_1 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a1_b2 ab_2 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a1_b3 ab_3 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-(13 rows)
+         ->  Parallel Append (actual rows=N loops=N)
+               Subplans Removed: 6
+               ->  Parallel Seq Scan on ab_a1_b1 ab_1 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a1_b2 ab_2 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a1_b3 ab_3 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+(12 rows)
 
 select explain_parallel_append('execute ab_q5 (2, 3, 3)');
-                              explain_parallel_append                               
-------------------------------------------------------------------------------------
- Finalize Aggregate (actual rows=N loops=N)
+                           explain_parallel_append                            
+------------------------------------------------------------------------------
+ Aggregate (actual rows=N loops=N)
    ->  Gather (actual rows=N loops=N)
          Workers Planned: 2
          Workers Launched: N
-         ->  Partial Aggregate (actual rows=N loops=N)
-               ->  Parallel Append (actual rows=N loops=N)
-                     Subplans Removed: 3
-                     ->  Parallel Seq Scan on ab_a2_b1 ab_1 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a2_b2 ab_2 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a2_b3 ab_3 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a3_b1 ab_4 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a3_b2 ab_5 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-                     ->  Parallel Seq Scan on ab_a3_b3 ab_6 (actual rows=N loops=N)
-                           Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
-(19 rows)
+         ->  Parallel Append (actual rows=N loops=N)
+               Subplans Removed: 3
+               ->  Parallel Seq Scan on ab_a2_b1 ab_1 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a2_b2 ab_2 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a2_b3 ab_3 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a3_b1 ab_4 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a3_b2 ab_5 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+               ->  Parallel Seq Scan on ab_a3_b3 ab_6 (actual rows=N loops=N)
+                     Filter: ((b < 4) AND (a = ANY (ARRAY[$1, $2, $3])))
+(18 rows)
 
 -- Try some params whose values do not belong to any partition.
 select explain_parallel_append('execute ab_q5 (33, 44, 55)');
-                  explain_parallel_append                  
------------------------------------------------------------
- Finalize Aggregate (actual rows=N loops=N)
+               explain_parallel_append               
+-----------------------------------------------------
+ Aggregate (actual rows=N loops=N)
    ->  Gather (actual rows=N loops=N)
          Workers Planned: 2
          Workers Launched: N
-         ->  Partial Aggregate (actual rows=N loops=N)
-               ->  Parallel Append (actual rows=N loops=N)
-                     Subplans Removed: 9
-(7 rows)
+         ->  Parallel Append (actual rows=N loops=N)
+               Subplans Removed: 9
+(6 rows)
 
 -- Test Parallel Append with PARAM_EXEC Params
 select explain_parallel_append('select count(*) from ab where (a = (select 1) or a = (select 3)) and b = 2');
@@ -3215,25 +3211,39 @@ select * from tbl1 join tprt on tbl1.col1 > tprt.col1;
  Nested Loop (actual rows=6.00 loops=1)
    ->  Seq Scan on tbl1 (actual rows=2.00 loops=1)
    ->  Append (actual rows=3.00 loops=2)
-         ->  Index Scan using tprt1_idx on tprt_1 (actual rows=2.00 loops=2)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 2
-         ->  Index Scan using tprt2_idx on tprt_2 (actual rows=2.00 loops=1)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 1
-         ->  Index Scan using tprt3_idx on tprt_3 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt4_idx on tprt_4 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt5_idx on tprt_5 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt6_idx on tprt_6 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-(21 rows)
+         ->  Bitmap Heap Scan on tprt_1 (actual rows=2.00 loops=2)
+               Recheck Cond: (tbl1.col1 > col1)
+               Heap Blocks: exact=2
+               ->  Bitmap Index Scan on tprt1_idx (actual rows=2.00 loops=2)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 2
+         ->  Bitmap Heap Scan on tprt_2 (actual rows=2.00 loops=1)
+               Recheck Cond: (tbl1.col1 > col1)
+               Heap Blocks: exact=1
+               ->  Bitmap Index Scan on tprt2_idx (actual rows=2.00 loops=1)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 1
+         ->  Bitmap Heap Scan on tprt_3 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt3_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_4 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt4_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_5 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt5_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_6 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt6_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+(35 rows)
 
 explain (analyze, costs off, summary off, timing off, buffers off)
 select * from tbl1 join tprt on tbl1.col1 = tprt.col1;
@@ -3293,25 +3303,40 @@ select * from tbl1 inner join tprt on tbl1.col1 > tprt.col1;
  Nested Loop (actual rows=23.00 loops=1)
    ->  Seq Scan on tbl1 (actual rows=5.00 loops=1)
    ->  Append (actual rows=4.60 loops=5)
-         ->  Index Scan using tprt1_idx on tprt_1 (actual rows=2.00 loops=5)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 5
-         ->  Index Scan using tprt2_idx on tprt_2 (actual rows=2.75 loops=4)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 4
-         ->  Index Scan using tprt3_idx on tprt_3 (actual rows=1.00 loops=2)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 2
-         ->  Index Scan using tprt4_idx on tprt_4 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt5_idx on tprt_5 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt6_idx on tprt_6 (never executed)
-               Index Cond: (col1 < tbl1.col1)
-               Index Searches: 0
-(21 rows)
+         ->  Bitmap Heap Scan on tprt_1 (actual rows=2.00 loops=5)
+               Recheck Cond: (tbl1.col1 > col1)
+               Heap Blocks: exact=5
+               ->  Bitmap Index Scan on tprt1_idx (actual rows=2.00 loops=5)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 5
+         ->  Bitmap Heap Scan on tprt_2 (actual rows=2.75 loops=4)
+               Recheck Cond: (tbl1.col1 > col1)
+               Heap Blocks: exact=4
+               ->  Bitmap Index Scan on tprt2_idx (actual rows=2.75 loops=4)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 4
+         ->  Bitmap Heap Scan on tprt_3 (actual rows=1.00 loops=2)
+               Recheck Cond: (tbl1.col1 > col1)
+               Heap Blocks: exact=2
+               ->  Bitmap Index Scan on tprt3_idx (actual rows=1.00 loops=2)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 2
+         ->  Bitmap Heap Scan on tprt_4 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt4_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_5 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt5_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_6 (never executed)
+               Recheck Cond: (tbl1.col1 > col1)
+               ->  Bitmap Index Scan on tprt6_idx (never executed)
+                     Index Cond: (col1 < tbl1.col1)
+                     Index Searches: 0
+(36 rows)
 
 explain (analyze, costs off, summary off, timing off, buffers off)
 select * from tbl1 inner join tprt on tbl1.col1 = tprt.col1;
@@ -3390,25 +3415,38 @@ select * from tbl1 join tprt on tbl1.col1 < tprt.col1;
  Nested Loop (actual rows=1.00 loops=1)
    ->  Seq Scan on tbl1 (actual rows=1.00 loops=1)
    ->  Append (actual rows=1.00 loops=1)
-         ->  Index Scan using tprt1_idx on tprt_1 (never executed)
-               Index Cond: (col1 > tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt2_idx on tprt_2 (never executed)
-               Index Cond: (col1 > tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt3_idx on tprt_3 (never executed)
-               Index Cond: (col1 > tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt4_idx on tprt_4 (never executed)
-               Index Cond: (col1 > tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt5_idx on tprt_5 (never executed)
-               Index Cond: (col1 > tbl1.col1)
-               Index Searches: 0
-         ->  Index Scan using tprt6_idx on tprt_6 (actual rows=1.00 loops=1)
-               Index Cond: (col1 > tbl1.col1)
-               Index Searches: 1
-(21 rows)
+         ->  Bitmap Heap Scan on tprt_1 (never executed)
+               Recheck Cond: (tbl1.col1 < col1)
+               ->  Bitmap Index Scan on tprt1_idx (never executed)
+                     Index Cond: (col1 > tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_2 (never executed)
+               Recheck Cond: (tbl1.col1 < col1)
+               ->  Bitmap Index Scan on tprt2_idx (never executed)
+                     Index Cond: (col1 > tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_3 (never executed)
+               Recheck Cond: (tbl1.col1 < col1)
+               ->  Bitmap Index Scan on tprt3_idx (never executed)
+                     Index Cond: (col1 > tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_4 (never executed)
+               Recheck Cond: (tbl1.col1 < col1)
+               ->  Bitmap Index Scan on tprt4_idx (never executed)
+                     Index Cond: (col1 > tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_5 (never executed)
+               Recheck Cond: (tbl1.col1 < col1)
+               ->  Bitmap Index Scan on tprt5_idx (never executed)
+                     Index Cond: (col1 > tbl1.col1)
+                     Index Searches: 0
+         ->  Bitmap Heap Scan on tprt_6 (actual rows=1.00 loops=1)
+               Recheck Cond: (tbl1.col1 < col1)
+               Heap Blocks: exact=1
+               ->  Bitmap Index Scan on tprt6_idx (actual rows=1.00 loops=1)
+                     Index Cond: (col1 > tbl1.col1)
+                     Index Searches: 1
+(34 rows)
 
 select tbl1.col1, tprt.col1 from tbl1
 inner join tprt on tbl1.col1 < tprt.col1

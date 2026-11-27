@@ -2343,21 +2343,14 @@ function_selectivity(PlannerInfo *root,
 }
 
 /*
- * add_function_cost
+ * add_function_cost_internal
  *
- * Get an estimate of the execution cost of a function, and *add* it to
- * the contents of *cost.  The estimate may include both one-time and
- * per-tuple components, since QualCost does.
- *
- * The funcid must always be supplied.  If it is being called as the
- * implementation of a specific parsetree node (FuncExpr, OpExpr,
- * WindowFunc, etc), pass that as "node", else pass NULL.
- *
- * In some usages root might be NULL, too.
+ * Common body of add_function_cost (bulk operator work) and add_expr_cost
+ * (expression evaluation).  Only the price per procost unit differs.
  */
-void
-add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
-				  QualCost *cost)
+static void
+add_function_cost_internal(PlannerInfo *root, Oid funcid, Node *node,
+						   QualCost *cost, Cost price)
 {
 	HeapTuple	proctup;
 	Form_pg_proc procform;
@@ -2396,9 +2389,45 @@ add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
 	}
 
 	/* No support function, or it failed, so rely on procost */
-	cost->per_tuple += procform->procost * cpu_operator_cost;
+	cost->per_tuple += procform->procost * price;
 
 	ReleaseSysCache(proctup);
+}
+
+/*
+ * add_function_cost
+ *
+ * Price a function or operator call at the bulk operator rate, which is
+ * what a comparison inside a sort, a hash probe or an aggregate transition
+ * pays: the tuples live in an array or a hash table, so each call touches
+ * memory that is probably not cached.
+ *
+ * The funcid must always be supplied.  If it is being called as the
+ * implementation of a specific parsetree node (FuncExpr, OpExpr,
+ * WindowFunc, etc), pass that as "node", else pass NULL.
+ *
+ * In some usages root might be NULL, too.
+ */
+void
+add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
+				  QualCost *cost)
+{
+	add_function_cost_internal(root, funcid, node, cost, cpu_operator_cost);
+}
+
+/*
+ * add_expr_cost
+ *
+ * Price a function or operator call as part of evaluating an expression on
+ * a tuple that the executor already holds: a filter, a projection, a check
+ * constraint.  That is a register-level operation and costs a fraction of
+ * the bulk rate, which is why it does not share cpu_operator_cost.
+ */
+void
+add_expr_cost(PlannerInfo *root, Oid funcid, Node *node,
+			  QualCost *cost)
+{
+	add_function_cost_internal(root, funcid, node, cost, COST_OP_QUAL);
 }
 
 /*
@@ -2500,6 +2529,58 @@ has_unique_index(RelOptInfo *rel, AttrNumber attno)
 	return false;
 }
 
+/*
+ * relation_has_unique_key_for
+ *
+ * Detect whether the relation has a unique index over exactly the set of
+ * columns given by 'vars', in any order, thus allowing us to conclude that
+ * every row has a distinct combination of those columns.
+ *
+ * As in has_unique_index(), partial indexes count only when the query
+ * implies their predicate, and expression indexes are ignored.
+ */
+bool
+relation_has_unique_key_for(RelOptInfo *rel, List *vars)
+{
+	Bitmapset  *attnums = NULL;
+	ListCell   *lc;
+	bool		result = false;
+
+	if (rel->reloptkind != RELOPT_BASEREL || rel->tuples <= 0)
+		return false;
+
+	foreach(lc, vars)
+	{
+		Var		   *var = lfirst_node(Var, lc);
+
+		if (var->varattno > 0)
+			attnums = bms_add_member(attnums, var->varattno);
+	}
+
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+		Bitmapset  *indexcols = NULL;
+		int			i;
+
+		if (!index->unique || index->indexprs != NIL ||
+			(index->indpred != NIL && !index->predOK) ||
+			index->nkeycolumns < 1)
+			continue;
+
+		for (i = 0; i < index->nkeycolumns; i++)
+			indexcols = bms_add_member(indexcols, index->indexkeys[i]);
+
+		result = bms_equal(indexcols, attnums);
+		bms_free(indexcols);
+
+		if (result)
+			break;
+	}
+
+	bms_free(attnums);
+	return result;
+}
 
 /*
  * has_row_triggers

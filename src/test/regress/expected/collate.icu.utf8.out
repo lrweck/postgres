@@ -1824,17 +1824,19 @@ ORDER BY 1, 2;
    Sort Key: t1.x COLLATE case_sensitive, test3cs.x COLLATE case_sensitive
    ->  Hash Join
          Output: t1.x, test3cs.x
-         Hash Cond: ((t1.x)::text = (test3cs.x)::text)
-         ->  Seq Scan on collate_tests.test1cs t1
-               Output: t1.x
-         ->  Hash
+         Hash Cond: ((test3cs.x)::text = (t1.x)::text)
+         ->  Unique
                Output: test3cs.x
-               ->  HashAggregate
+               ->  Sort
                      Output: test3cs.x
-                     Group Key: test3cs.x
+                     Sort Key: test3cs.x COLLATE case_sensitive
                      ->  Seq Scan on collate_tests.test3cs
                            Output: test3cs.x
-(15 rows)
+         ->  Hash
+               Output: t1.x
+               ->  Seq Scan on collate_tests.test1cs t1
+                     Output: t1.x
+(17 rows)
 
 SELECT * FROM test1cs t1, (SELECT DISTINCT x FROM test3cs) t2
 WHERE t1.x = t2.x COLLATE case_insensitive
@@ -1861,17 +1863,20 @@ ORDER BY 1, 2;
    Sort Key: t1.x COLLATE case_sensitive, test3cs.x COLLATE case_sensitive
    ->  Hash Join
          Output: t1.x, test3cs.x
-         Hash Cond: ((t1.x)::text = (test3cs.x)::text)
-         ->  Seq Scan on collate_tests.test1cs t1
-               Output: t1.x
-         ->  Hash
+         Hash Cond: ((test3cs.x)::text = (t1.x)::text)
+         ->  Group
                Output: test3cs.x
-               ->  HashAggregate
+               Group Key: test3cs.x
+               ->  Sort
                      Output: test3cs.x
-                     Group Key: test3cs.x
+                     Sort Key: test3cs.x COLLATE case_sensitive
                      ->  Seq Scan on collate_tests.test3cs
                            Output: test3cs.x
-(15 rows)
+         ->  Hash
+               Output: t1.x
+               ->  Seq Scan on collate_tests.test1cs t1
+                     Output: t1.x
+(18 rows)
 
 SELECT * FROM test1cs t1, (SELECT x FROM test3cs GROUP BY x) t2
 WHERE t1.x = t2.x COLLATE case_insensitive
@@ -1899,19 +1904,21 @@ ORDER BY 1, 2;
    ->  Hash Join
          Output: t1.x, test3cs.x
          Hash Cond: ((test3cs.x)::text = (t1.x)::text)
-         ->  HashAggregate
+         ->  Unique
                Output: test3cs.x
-               Group Key: test3cs.x
-               ->  Append
-                     ->  Seq Scan on collate_tests.test3cs
-                           Output: test3cs.x
-                     ->  Seq Scan on collate_tests.test3cs test3cs_1
-                           Output: test3cs_1.x
+               ->  Sort
+                     Output: test3cs.x
+                     Sort Key: test3cs.x COLLATE case_sensitive
+                     ->  Append
+                           ->  Seq Scan on collate_tests.test3cs
+                                 Output: test3cs.x
+                           ->  Seq Scan on collate_tests.test3cs test3cs_1
+                                 Output: test3cs_1.x
          ->  Hash
                Output: t1.x
                ->  Seq Scan on collate_tests.test1cs t1
                      Output: t1.x
-(18 rows)
+(20 rows)
 
 SELECT * FROM test1cs t1, (SELECT x FROM test3cs UNION SELECT x FROM test3cs) t2
 WHERE t1.x = t2.x COLLATE case_insensitive
@@ -1931,18 +1938,19 @@ EXPLAIN (COSTS OFF)
 SELECT t1.* FROM test3cs t1
        LEFT JOIN (SELECT DISTINCT x FROM test3cs) t2 ON t1.x = t2.x COLLATE case_insensitive
 ORDER BY 1;
-                  QUERY PLAN                   
------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Sort
    Sort Key: t1.x COLLATE case_sensitive
    ->  Hash Left Join
          Hash Cond: (t1.x = (test3cs.x)::text)
          ->  Seq Scan on test3cs t1
          ->  Hash
-               ->  HashAggregate
-                     Group Key: test3cs.x
-                     ->  Seq Scan on test3cs
-(9 rows)
+               ->  Unique
+                     ->  Sort
+                           Sort Key: test3cs.x COLLATE case_sensitive
+                           ->  Seq Scan on test3cs
+(10 rows)
 
 SELECT t1.* FROM test3cs t1
        LEFT JOIN (SELECT DISTINCT x FROM test3cs) t2 ON t1.x = t2.x COLLATE case_insensitive
@@ -1963,18 +1971,19 @@ SELECT * FROM test3cs t1
   WHERE EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM test3cs) t2
                 WHERE t1.x = t2.x COLLATE case_insensitive)
 ORDER BY 1;
-                      QUERY PLAN                       
--------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Sort
    Sort Key: t1.x COLLATE case_sensitive
    ->  Hash Semi Join
          Hash Cond: ((t1.x)::text = (test3cs.x)::text)
          ->  Seq Scan on test3cs t1
          ->  Hash
-               ->  HashAggregate
-                     Group Key: test3cs.x
-                     ->  Seq Scan on test3cs
-(9 rows)
+               ->  Unique
+                     ->  Sort
+                           Sort Key: test3cs.x COLLATE case_sensitive
+                           ->  Seq Scan on test3cs
+(10 rows)
 
 SELECT * FROM test3cs t1
   WHERE EXISTS (SELECT 1 FROM (SELECT DISTINCT x FROM test3cs) t2
@@ -2153,17 +2162,20 @@ SET LOCAL enable_hashagg TO off;
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Aggregate
    ->  Nested Loop
          ->  Unique
                ->  Sort
                      Sort Key: test3cs.x COLLATE case_insensitive
-                     ->  Index Only Scan using test3cs_x_idx on test3cs
-         ->  Index Only Scan using test1ci_x_idx on test1ci
-               Index Cond: (x = (test3cs.x)::text)
-(8 rows)
+                     ->  Bitmap Heap Scan on test3cs
+                           ->  Bitmap Index Scan on test3cs_x_idx
+         ->  Bitmap Heap Scan on test1ci
+               Recheck Cond: (x = (test3cs.x)::text)
+               ->  Bitmap Index Scan on test1ci_x_idx
+                     Index Cond: (x = (test3cs.x)::text)
+(11 rows)
 
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
@@ -2177,16 +2189,15 @@ SET LOCAL enable_groupagg TO off;
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Aggregate
-   ->  Nested Loop
-         ->  HashAggregate
-               Group Key: (test3cs.x)::text
-               ->  Index Only Scan using test3cs_x_idx on test3cs
+   ->  Nested Loop Semi Join
+         Join Filter: (test1ci.x = (test3cs.x)::text)
          ->  Index Only Scan using test1ci_x_idx on test1ci
-               Index Cond: (x = (test3cs.x)::text)
-(7 rows)
+         ->  Bitmap Heap Scan on test3cs
+               ->  Bitmap Index Scan on test3cs_x_idx
+(6 rows)
 
 SELECT count(*) FROM test1ci
 WHERE x COLLATE case_insensitive IN (SELECT x FROM test3cs);
@@ -2210,8 +2221,8 @@ EXPLAIN (COSTS OFF)
 SELECT t2.x, count(*) FROM test_memoize_ci t1
   LEFT JOIN test3cs t2 ON t2.x COLLATE case_sensitive = t1.x
 GROUP BY t2.x ORDER BY t2.x;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Sort
    Sort Key: t2.x COLLATE case_sensitive
    ->  HashAggregate
@@ -2221,9 +2232,11 @@ GROUP BY t2.x ORDER BY t2.x;
                ->  Memoize
                      Cache Key: t1.x
                      Cache Mode: logical
-                     ->  Index Only Scan using test3cs_x_idx on test3cs t2
-                           Index Cond: (x = t1.x)
-(11 rows)
+                     ->  Bitmap Heap Scan on test3cs t2
+                           Recheck Cond: (x = t1.x)
+                           ->  Bitmap Index Scan on test3cs_x_idx
+                                 Index Cond: (x = t1.x)
+(13 rows)
 
 -- Ensure we get the expected results
 SELECT t2.x, count(*) FROM test_memoize_ci t1
@@ -2267,8 +2280,8 @@ EXPLAIN (COSTS OFF)
 SELECT t1.x COLLATE "C", t2.x COLLATE "C", count(*) FROM test_memoize_ci t1
   INNER JOIN test_memoize_ci_inner t2 ON t2.x === t1.x
 GROUP BY 1, 2 ORDER BY 1, 2;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Sort
    Sort Key: ((t1.x)::text) COLLATE "C", ((t2.x)::text) COLLATE "C"
    ->  HashAggregate
@@ -2276,12 +2289,9 @@ GROUP BY 1, 2 ORDER BY 1, 2;
          ->  Nested Loop
                ->  Seq Scan on test_memoize_ci t1
                      Disabled: true
-               ->  Memoize
-                     Cache Key: t1.x
-                     Cache Mode: logical
-                     ->  Index Scan using test_memoize_ci_inner_x_idx on test_memoize_ci_inner t2
-                           Index Cond: (x === t1.x)
-(12 rows)
+               ->  Index Scan using test_memoize_ci_inner_x_idx on test_memoize_ci_inner t2
+                     Index Cond: (x === t1.x)
+(9 rows)
 
 -- Ensure we get the expected results
 SELECT t1.x COLLATE "C", t2.x COLLATE "C", count(*) FROM test_memoize_ci t1
@@ -2303,19 +2313,21 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM test1ci WHERE x ~ '^abc$' COLLATE "C";
                 QUERY PLAN                 
 -------------------------------------------
- Index Scan using test1ci_x_idx on test1ci
-   Index Cond: (x = 'abc'::text)
+ Bitmap Heap Scan on test1ci
    Filter: (x ~ '^abc$'::text COLLATE "C")
-(3 rows)
+   ->  Bitmap Index Scan on test1ci_x_idx
+         Index Cond: (x = 'abc'::text)
+(4 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM test1ci WHERE x LIKE 'abc' COLLATE case_insensitive;
                       QUERY PLAN                       
 -------------------------------------------------------
- Index Scan using test1ci_x_idx on test1ci
-   Index Cond: (x = 'abc'::text)
+ Bitmap Heap Scan on test1ci
    Filter: (x ~~ 'abc'::text COLLATE case_insensitive)
-(3 rows)
+   ->  Bitmap Index Scan on test1ci_x_idx
+         Index Cond: (x = 'abc'::text)
+(4 rows)
 
 RESET enable_seqscan;
 RESET enable_indexonlyscan;
@@ -2346,7 +2358,7 @@ EXPLAIN (COSTS OFF)
 SELECT x, count(*) FROM test3ci GROUP BY x HAVING x = 'abc' COLLATE case_insensitive;
                          QUERY PLAN                         
 ------------------------------------------------------------
- GroupAggregate
+ HashAggregate
    ->  Seq Scan on test3ci
          Filter: (x = 'abc'::text COLLATE case_insensitive)
 (3 rows)
@@ -2452,7 +2464,7 @@ EXPLAIN (COSTS OFF)
 SELECT x, count(*) FROM test3ci GROUP BY x HAVING x = 'abc' COLLATE case_insensitive AND x >= 'a' COLLATE case_insensitive;
                                                  QUERY PLAN                                                 
 ------------------------------------------------------------------------------------------------------------
- GroupAggregate
+ HashAggregate
    ->  Seq Scan on test3ci
          Filter: ((x >= 'a'::text COLLATE case_insensitive) AND (x = 'abc'::text COLLATE case_insensitive))
 (3 rows)
@@ -2606,7 +2618,7 @@ EXPLAIN (COSTS OFF)
 SELECT x, count(*) FROM test3cs GROUP BY x HAVING x = 'abc' COLLATE case_sensitive;
                         QUERY PLAN                        
 ----------------------------------------------------------
- GroupAggregate
+ HashAggregate
    ->  Seq Scan on test3cs
          Filter: (x = 'abc'::text COLLATE case_sensitive)
 (3 rows)
@@ -2621,10 +2633,10 @@ EXPLAIN (COSTS OFF)
 SELECT x, count(*) FROM test3cs GROUP BY x HAVING x = 'abc' COLLATE case_insensitive ORDER BY 1;
                             QUERY PLAN                            
 ------------------------------------------------------------------
- GroupAggregate
-   Group Key: x
-   ->  Sort
-         Sort Key: x COLLATE case_sensitive
+ Sort
+   Sort Key: x COLLATE case_sensitive
+   ->  HashAggregate
+         Group Key: x
          ->  Seq Scan on test3cs
                Filter: (x = 'abc'::text COLLATE case_insensitive)
 (6 rows)
@@ -3576,20 +3588,16 @@ SELECT upper(c collate case_insensitive), count(c) FROM pagg_tab3 GROUP BY c col
 SET enable_partitionwise_aggregate TO true;
 EXPLAIN (COSTS OFF)
 SELECT upper(c collate case_insensitive), count(c) FROM pagg_tab3 GROUP BY c collate case_insensitive ORDER BY 1;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                        QUERY PLAN                         
+-----------------------------------------------------------
  Sort
    Sort Key: (upper(pagg_tab3.c)) COLLATE case_insensitive
-   ->  Finalize HashAggregate
+   ->  HashAggregate
          Group Key: pagg_tab3.c
          ->  Append
-               ->  Partial HashAggregate
-                     Group Key: pagg_tab3.c
-                     ->  Seq Scan on pagg_tab3_p2 pagg_tab3
-               ->  Partial HashAggregate
-                     Group Key: pagg_tab3_1.c
-                     ->  Seq Scan on pagg_tab3_p1 pagg_tab3_1
-(11 rows)
+               ->  Seq Scan on pagg_tab3_p2 pagg_tab3_1
+               ->  Seq Scan on pagg_tab3_p1 pagg_tab3_2
+(7 rows)
 
 SELECT upper(c collate case_insensitive), count(c) FROM pagg_tab3 GROUP BY c collate case_insensitive ORDER BY 1;
  upper | count 
@@ -3606,14 +3614,12 @@ SELECT c collate "C", count(c) FROM pagg_tab3 GROUP BY c collate "C" ORDER BY 1;
 --------------------------------------------------------
  Sort
    Sort Key: ((pagg_tab3.c)::text) COLLATE "C"
-   ->  Append
-         ->  HashAggregate
-               Group Key: (pagg_tab3.c)::text
-               ->  Seq Scan on pagg_tab3_p2 pagg_tab3
-         ->  HashAggregate
-               Group Key: (pagg_tab3_1.c)::text
-               ->  Seq Scan on pagg_tab3_p1 pagg_tab3_1
-(9 rows)
+   ->  HashAggregate
+         Group Key: ((pagg_tab3.c)::text)
+         ->  Append
+               ->  Seq Scan on pagg_tab3_p2 pagg_tab3_1
+               ->  Seq Scan on pagg_tab3_p1 pagg_tab3_2
+(7 rows)
 
 SELECT c collate "C", count(c) FROM pagg_tab3 GROUP BY c collate "C" ORDER BY 1;
  c | count 
@@ -3794,26 +3800,28 @@ INSERT INTO pagg_tab6 (b, c) SELECT substr('cdCD', (i % 4) + 1 , 1), substr('cdC
 ANALYZE pagg_tab6;
 EXPLAIN (COSTS OFF)
 SELECT t1.c, count(t2.c) FROM pagg_tab5 t1 JOIN pagg_tab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C";
-                      QUERY PLAN                       
--------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Sort
    Sort Key: t1.c COLLATE "C"
    ->  Append
          ->  HashAggregate
                Group Key: t1.c
-               ->  Nested Loop
-                     Join Filter: (t1.c = t2.c)
-                     ->  Seq Scan on pagg_tab6_p1 t2
-                           Filter: (c = b)
+               ->  Hash Join
+                     Hash Cond: (t1.c = t2.c)
                      ->  Seq Scan on pagg_tab5_p1 t1
+                     ->  Hash
+                           ->  Seq Scan on pagg_tab6_p1 t2
+                                 Filter: (c = b)
          ->  HashAggregate
                Group Key: t1_1.c
-               ->  Nested Loop
-                     Join Filter: (t1_1.c = t2_1.c)
-                     ->  Seq Scan on pagg_tab6_p2 t2_1
-                           Filter: (c = b)
+               ->  Hash Join
+                     Hash Cond: (t1_1.c = t2_1.c)
                      ->  Seq Scan on pagg_tab5_p2 t1_1
-(17 rows)
+                     ->  Hash
+                           ->  Seq Scan on pagg_tab6_p2 t2_1
+                                 Filter: (c = b)
+(19 rows)
 
 SELECT t1.c, count(t2.c) FROM pagg_tab5 t1 JOIN pagg_tab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C";
  c | count 
@@ -3879,15 +3887,16 @@ SELECT t1.id, count(t1.val)
   FROM eager_agg_t1 t1
   JOIN eager_agg_t2 t2 ON t1.val = t2.val COLLATE "C"
 GROUP BY t1.id;
-                       QUERY PLAN                       
---------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  HashAggregate
    Group Key: t1.id
-   ->  Nested Loop
-         Join Filter: ((t1.val)::text = (t2.val)::text)
-         ->  Seq Scan on eager_agg_t2 t2
+   ->  Hash Join
+         Hash Cond: ((t1.val)::text = (t2.val)::text)
          ->  Seq Scan on eager_agg_t1 t1
-(6 rows)
+         ->  Hash
+               ->  Seq Scan on eager_agg_t2 t2
+(7 rows)
 
 -- Ensure it returns 1 row with count = 50
 SELECT t1.id, count(t1.val)
@@ -3906,15 +3915,16 @@ SELECT t1.id, t1.val, count(t1.val)
   FROM eager_agg_t1 t1
   JOIN eager_agg_t2 t2 ON t1.val = t2.val COLLATE "C"
 GROUP BY t1.id, t1.val;
-                       QUERY PLAN                       
---------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  HashAggregate
    Group Key: t1.id, t1.val
-   ->  Nested Loop
-         Join Filter: ((t1.val)::text = (t2.val)::text)
-         ->  Seq Scan on eager_agg_t2 t2
+   ->  Hash Join
+         Hash Cond: ((t1.val)::text = (t2.val)::text)
          ->  Seq Scan on eager_agg_t1 t1
-(6 rows)
+         ->  Hash
+               ->  Seq Scan on eager_agg_t2 t2
+(7 rows)
 
 -- Ensure it returns 1 row with count = 50
 SELECT t1.id, t1.val, count(t1.val)
