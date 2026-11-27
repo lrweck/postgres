@@ -227,6 +227,14 @@ extern double estimate_num_groups(PlannerInfo *root, List *groupExprs,
 								  double input_rows, List **pgset,
 								  EstimationInfo *estinfo);
 
+extern bool estimate_join_ndistinct(PlannerInfo *root, RelOptInfo *rel,
+									List *vars, double *ndistinct);
+
+extern double estimate_selfjoin_selectivity(PlannerInfo *root,
+											RelOptInfo *outer_rel,
+											RelOptInfo *inner_rel,
+											List *restrictlist);
+
 extern List *estimate_multivariate_bucketsize(PlannerInfo *root,
 											  RelOptInfo *inner,
 											  List *hashclauses,
@@ -240,6 +248,15 @@ extern double estimate_hashagg_tablesize(PlannerInfo *root, Path *path,
 										 double dNumGroups);
 
 extern List *get_quals_from_indexclauses(List *indexclauses);
+/*
+ * At most this many rows on the other side of "column = value" still counts as
+ * pointing at a few specific values of the column (a filtered dimension
+ * table), for which the MCV list is a better guide than the uniform average.
+ */
+#define EQ_JOIN_SMALL_ROWS 10.0
+
+extern double estimate_unknown_value_selectivity(PlannerInfo *root, Node *var);
+
 extern Cost index_other_operands_eval_cost(PlannerInfo *root,
 										   List *indexquals);
 extern List *add_predicate_to_index_quals(IndexOptInfo *index,

@@ -1932,13 +1932,15 @@ SELECT * FROM tenk1
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1
   WHERE thousand = 42 AND (tenthous = 1 OR tenthous = (SELECT 1 + 2) OR tenthous = 42);
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
- Index Scan using tenk1_thous_tenthous on tenk1
-   Index Cond: ((thousand = 42) AND (tenthous = ANY (ARRAY[1, (InitPlan expr_1).col1, 42])))
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on tenk1
+   Recheck Cond: ((thousand = 42) AND ((tenthous = 1) OR (tenthous = (InitPlan expr_1).col1) OR (tenthous = 42)))
    InitPlan expr_1
      ->  Result
-(4 rows)
+   ->  Bitmap Index Scan on tenk1_thous_tenthous
+         Index Cond: ((thousand = 42) AND (tenthous = ANY (ARRAY[1, (InitPlan expr_1).col1, 42])))
+(6 rows)
 
 SELECT * FROM tenk1
   WHERE thousand = 42 AND (tenthous = 1 OR tenthous = (SELECT 1 + 2) OR tenthous = 42);
@@ -2026,11 +2028,13 @@ SELECT count(*) FROM tenk1
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1
   WHERE thousand = 42 AND (tenthous = 1 OR tenthous = 3 OR tenthous = 42);
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
- Index Scan using tenk1_thous_tenthous on tenk1
-   Index Cond: ((thousand = 42) AND (tenthous = ANY ('{1,3,42}'::integer[])))
-(2 rows)
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on tenk1
+   Recheck Cond: ((thousand = 42) AND ((tenthous = 1) OR (tenthous = 3) OR (tenthous = 42)))
+   ->  Bitmap Index Scan on tenk1_thous_tenthous
+         Index Cond: ((thousand = 42) AND (tenthous = ANY ('{1,3,42}'::integer[])))
+(4 rows)
 
 SELECT * FROM tenk1
   WHERE thousand = 42 AND (tenthous = 1 OR tenthous = 3 OR tenthous = 42);
@@ -2066,7 +2070,7 @@ SELECT count(*) FROM tenk1 t1
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
  Aggregate
-   ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t1
+   ->  Seq Scan on tenk1 t1
          Filter: ((thousand = 42) OR (thousand = (SubPlan expr_1)))
          SubPlan expr_1
            ->  Limit
@@ -2211,16 +2215,12 @@ SELECT count(*) FROM tenk1, tenk2
  Aggregate
    ->  Nested Loop
          Join Filter: ((tenk2.thousand = 42) OR (tenk1.thousand = 41) OR (tenk2.tenthous = 2))
-         ->  Bitmap Heap Scan on tenk1
-               Recheck Cond: (hundred = 42)
-               ->  Bitmap Index Scan on tenk1_hundred
-                     Index Cond: (hundred = 42)
+         ->  Seq Scan on tenk1
+               Filter: (hundred = 42)
          ->  Materialize
-               ->  Bitmap Heap Scan on tenk2
-                     Recheck Cond: (hundred = 42)
-                     ->  Bitmap Index Scan on tenk2_hundred
-                           Index Cond: (hundred = 42)
-(12 rows)
+               ->  Seq Scan on tenk2
+                     Filter: (hundred = 42)
+(8 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM tenk1, tenk2
@@ -2263,16 +2263,14 @@ SELECT count(*) FROM tenk1 LEFT JOIN tenk2 ON
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
  Aggregate
-   ->  Nested Loop Left Join
+   ->  Hash Left Join
+         Hash Cond: (tenk1.hundred = tenk2.hundred)
          Join Filter: (tenk1.hundred = 42)
-         ->  Index Only Scan using tenk1_hundred on tenk1
-         ->  Memoize
-               Cache Key: tenk1.hundred
-               Cache Mode: logical
-               ->  Index Scan using tenk2_hundred on tenk2
-                     Index Cond: (hundred = tenk1.hundred)
+         ->  Seq Scan on tenk1
+         ->  Hash
+               ->  Seq Scan on tenk2
                      Filter: ((thousand = 42) OR (thousand = 41) OR (tenthous = 2))
-(10 rows)
+(8 rows)
 
 --
 -- Check behavior with duplicate index column contents
@@ -2564,11 +2562,13 @@ SELECT unique1 FROM tenk1 WHERE unique1 IN (1, 42, 7) and unique1 < (-1)::bigint
 
 explain (costs off)
 SELECT unique1 FROM tenk1 WHERE (thousand, tenthous) > (NULL, 5);
-                           QUERY PLAN                            
------------------------------------------------------------------
- Index Scan using tenk1_thous_tenthous on tenk1
-   Index Cond: (ROW(thousand, tenthous) > ROW(NULL::integer, 5))
-(2 rows)
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Bitmap Heap Scan on tenk1
+   Recheck Cond: (ROW(thousand, tenthous) > ROW(NULL::integer, 5))
+   ->  Bitmap Index Scan on tenk1_thous_tenthous
+         Index Cond: (ROW(thousand, tenthous) > ROW(NULL::integer, 5))
+(4 rows)
 
 SELECT unique1 FROM tenk1 WHERE (thousand, tenthous) > (NULL, 5);
  unique1 
@@ -2639,11 +2639,13 @@ ORDER BY thousand limit 2;
 --
 explain (costs off)
   select * from tenk1 where (thousand, tenthous) in ((1,1001), (null,null));
-                      QUERY PLAN                      
-------------------------------------------------------
- Index Scan using tenk1_thous_tenthous on tenk1
-   Index Cond: ((thousand = 1) AND (tenthous = 1001))
-(2 rows)
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Bitmap Heap Scan on tenk1
+   Recheck Cond: ((thousand = 1) AND (tenthous = 1001))
+   ->  Bitmap Index Scan on tenk1_thous_tenthous
+         Index Cond: ((thousand = 1) AND (tenthous = 1001))
+(4 rows)
 
 --
 -- Check matching of boolean index columns to WHERE conditions and sort keys
@@ -3451,32 +3453,22 @@ DROP TABLE concur_temp_tab_1, concur_temp_tab_2, reindex_temp_before;
 -- permutations in the filtering conditions we could see in the EXPLAIN.
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1 WHERE unique1 < 1 OR hundred < 2;
-                    QUERY PLAN                    
---------------------------------------------------
- Bitmap Heap Scan on tenk1
-   Recheck Cond: ((unique1 < 1) OR (hundred < 2))
-   ->  BitmapOr
-         ->  Bitmap Index Scan on tenk1_unique1
-               Index Cond: (unique1 < 1)
-         ->  Bitmap Index Scan on tenk1_hundred
-               Index Cond: (hundred < 2)
-(7 rows)
+                 QUERY PLAN                 
+--------------------------------------------
+ Seq Scan on tenk1
+   Filter: ((unique1 < 1) OR (hundred < 2))
+(2 rows)
 
 -- OR clauses in the 'unique1' column are grouped, so clause permutation
 -- occurs. W e can see it in the 'Recheck Cond': the second clause involving
 -- the 'unique1' column goes just after the first one.
 EXPLAIN (COSTS OFF)
 SELECT * FROM tenk1 WHERE unique1 < 1 OR unique1 < 3 OR hundred < 2;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Bitmap Heap Scan on tenk1
-   Recheck Cond: (((unique1 < 1) OR (unique1 < 3)) OR (hundred < 2))
-   ->  BitmapOr
-         ->  Bitmap Index Scan on tenk1_unique1
-               Index Cond: (unique1 < ANY ('{1,3}'::integer[]))
-         ->  Bitmap Index Scan on tenk1_hundred
-               Index Cond: (hundred < 2)
-(7 rows)
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Seq Scan on tenk1
+   Filter: ((unique1 < 1) OR (unique1 < 3) OR (hundred < 2))
+(2 rows)
 
 -- Check bitmap scan can consider similar OR arguments separately without
 -- grouping them into SAOP.

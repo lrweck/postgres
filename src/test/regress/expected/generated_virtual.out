@@ -1661,10 +1661,10 @@ order by t1.a;
          Window: w1 AS (PARTITION BY t2.a)
          ->  Sort
                Sort Key: t2.a
-               ->  Nested Loop Left Join
-                     Join Filter: (t1.a = t2.a)
+               ->  Hash Left Join
+                     Hash Cond: (t1.a = t2.a)
                      ->  Seq Scan on gtest32 t1
-                     ->  Materialize
+                     ->  Hash
                            ->  Seq Scan on gtest32 t2
 (11 rows)
 

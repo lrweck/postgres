@@ -262,12 +262,12 @@ $$ LANGUAGE plpgsql PARALLEL UNSAFE;
 -- Ensure we don't do parallel distinct with a parallel unsafe function
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT distinct_func(1) FROM tenk1;
-                        QUERY PLAN                        
-----------------------------------------------------------
+              QUERY PLAN              
+--------------------------------------
  Unique
    ->  Sort
          Sort Key: (distinct_func(1))
-         ->  Index Only Scan using tenk1_hundred on tenk1
+         ->  Seq Scan on tenk1
 (4 rows)
 
 -- make the function parallel safe
@@ -506,12 +506,11 @@ SELECT DISTINCT y, x FROM (SELECT * FROM distinct_tbl ORDER BY x) s;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
  Unique
-   ->  Incremental Sort
-         Sort Key: s.x, s.y
-         Presorted Key: s.x
+   ->  Sort
+         Sort Key: s.y, s.x
          ->  Subquery Scan on s
                ->  Index Only Scan using distinct_tbl_x_y_idx on distinct_tbl
-(6 rows)
+(5 rows)
 
 SELECT DISTINCT y, x FROM (SELECT * FROM distinct_tbl ORDER BY x) s;
  y | x 

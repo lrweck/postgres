@@ -4941,7 +4941,11 @@ where exists (select 1 from tenk1 t3
       and t1.unique1 < 1;
 
 -- ... unless it actually is unique
-create table j3 as select unique1, tenthous from onek;
+-- Use a temp table so only this backend can see it: vacuum then reliably
+-- marks its pages all-visible, and the plan below does not flip between an
+-- index-only scan and a bitmap heap scan depending on other backends' old
+-- snapshots.
+create temp table j3 as select unique1, tenthous from onek;
 vacuum analyze j3;
 create unique index on j3(unique1, tenthous);
 
@@ -5076,3 +5080,490 @@ FROM (VALUES (1)) AS v(z) LEFT JOIN
 WHERE s.x = s.c;
 
 ROLLBACK;
+
+-- check_join_est_rows() mirrors the helper in stats_ext, which cannot be reused
+-- here because regression tests share one database.
+CREATE FUNCTION check_join_est_rows(text) RETURNS TABLE (estimated int, actual int)
+LANGUAGE plpgsql AS
+$$
+DECLARE
+    ln text;
+    tmp text[];
+    first_row bool := true;
+BEGIN
+    FOR ln IN EXECUTE format('EXPLAIN ANALYZE %s', $1) LOOP
+        IF first_row THEN
+            first_row := false;
+            tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+            RETURN QUERY SELECT tmp[1]::int, tmp[2]::int;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+-- Inequality joins use both sides' distributions instead of a fixed 1/3.
+CREATE TABLE join_est_lo (x int);
+CREATE TABLE join_est_hi (y int);
+INSERT INTO join_est_lo SELECT i FROM generate_series(1, 100) i;
+INSERT INTO join_est_hi SELECT i FROM generate_series(1000, 1100) i;
+ANALYZE join_est_lo;
+ANALYZE join_est_hi;
+-- ranges do not overlap: nothing matches, where a constant would say 1/3 do
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_hi h JOIN join_est_lo l ON h.y < l.x
+$$);
+-- and the opposite: every pair matches
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_lo l JOIN join_est_hi h ON l.x < h.y
+$$);
+
+
+-- A column whose MCV list holds every value and leaves no histogram: its
+-- frequencies are stored rounded, and the residue must not send the estimate
+-- back to the constant.
+CREATE TABLE join_est_mcv (y int);
+INSERT INTO join_est_mcv SELECT i % 20 FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_hist (x int);
+INSERT INTO join_est_hist SELECT i % 1000 FROM generate_series(1, 5000) i;
+ANALYZE join_est_mcv;
+ANALYZE join_est_hist;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_hist h JOIN join_est_mcv m ON h.x < m.y
+$$);
+DROP TABLE join_est_hist, join_est_mcv;
+
+-- A side whose statistics do not describe its distribution keeps the constant
+-- rather than inventing a distribution from nothing.  The row count is known
+-- here, so only the join selectivity falls back.
+CREATE TABLE join_est_no (x int);
+INSERT INTO join_est_no SELECT i FROM generate_series(1, 100) i;
+ALTER TABLE join_est_no ALTER COLUMN x SET STATISTICS 0;
+ANALYZE join_est_no;
+CREATE TABLE join_est_yes (y int);
+INSERT INTO join_est_yes SELECT i FROM generate_series(1, 100) i;
+ANALYZE join_est_yes;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_no n JOIN join_est_yes y ON n.x < y.y
+$$);
+DROP TABLE join_est_no, join_est_yes;
+
+-- A comparison between two types is not given a distribution either.
+CREATE TABLE join_est_big (y bigint);
+INSERT INTO join_est_big SELECT i FROM generate_series(1, 100) i;
+ANALYZE join_est_big;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_lo l JOIN join_est_big b ON l.x < b.y
+$$);
+DROP TABLE join_est_big;
+
+-- The inclusive operators use the same distributions as the strict ones.
+CREATE TABLE join_est_ov (x int);
+CREATE TABLE join_est_ov2 (y int);
+INSERT INTO join_est_ov SELECT i FROM generate_series(1, 100) i;
+INSERT INTO join_est_ov2 SELECT i FROM generate_series(1, 100) i;
+ANALYZE join_est_ov;
+ANALYZE join_est_ov2;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ov a JOIN join_est_ov2 b ON a.x <= b.y
+$$);
+
+-- A few distinct values put the whole column in the MCV list and leave no
+-- histogram; the distribution is still fully known.
+CREATE TABLE join_est_few (x int);
+INSERT INTO join_est_few SELECT (i % 5) * 10 FROM generate_series(1, 1000) i;
+ANALYZE join_est_few;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ov a JOIN join_est_few f ON f.x <= a.x
+$$);
+
+-- NULLs match nothing, and both sides' null fraction is charged once.
+CREATE TABLE join_est_lnull (x int);
+INSERT INTO join_est_lnull SELECT CASE WHEN i % 2 = 0 THEN NULL ELSE i END
+                        FROM generate_series(1, 200) i;
+ANALYZE join_est_lnull;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ov a JOIN join_est_lnull n ON n.x <= a.x
+$$);
+DROP TABLE join_est_ov, join_est_ov2, join_est_few, join_est_lnull;
+
+DROP TABLE join_est_lo, join_est_hi;
+
+CREATE TABLE join_est_uniq (a int, b int, payload text, PRIMARY KEY (a, b));
+INSERT INTO join_est_uniq SELECT i, i + 100000, 'x' FROM generate_series(1, 2000) i;
+CREATE TABLE join_est_ref (a int, b int);
+INSERT INTO join_est_ref SELECT i, i + 100000 FROM generate_series(1, 2000) i;
+ANALYZE join_est_uniq;
+ANALYZE join_est_ref;
+-- every row matches exactly one: the estimate must not be the independence
+-- product, which here would be a single row
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_ref r JOIN join_est_uniq u ON r.a = u.a AND r.b = u.b
+$$);
+
+-- The bound also holds for a unique index whose columns are nullable: NULLs
+-- never match, so the estimate is scaled by the non-null fraction.
+CREATE TABLE join_est_null (a int, b int);
+CREATE UNIQUE INDEX join_est_null_idx ON join_est_null (a, b);
+INSERT INTO join_est_null SELECT i, i FROM generate_series(1, 1000) i;
+INSERT INTO join_est_null SELECT NULL, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_null;
+-- 1000 of 2000 rows have a NULL key, so about half of them can match
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_null n1 JOIN join_est_null n2 ON n1.a = n2.a AND n1.b = n2.b
+$$);
+
+DROP TABLE join_est_uniq, join_est_ref, join_est_null;
+
+-- The joint distinct count of the other side cannot exceed its row count.  When
+-- that side is itself a join, its per-column counts multiply to far more than
+-- its rows, and without the cap the key's bound collapses to a single row.
+CREATE TABLE join_est_pk (a int, b int, PRIMARY KEY (a, b));
+INSERT INTO join_est_pk SELECT i, i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_o (a int, b int, x int);
+INSERT INTO join_est_o SELECT i, i, i % 10 FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_d (x int);
+INSERT INTO join_est_d SELECT i FROM generate_series(0, 9) i;
+ANALYZE join_est_pk;
+ANALYZE join_est_o;
+ANALYZE join_est_d;
+-- every row of the two-relation side matches exactly one key row
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_o o JOIN join_est_d d ON o.x = d.x
+        JOIN join_est_pk p ON p.a = o.a AND p.b = o.b
+$$);
+DROP TABLE join_est_pk, join_est_o, join_est_d;
+
+
+-- A single-column unique key is left to eqjoinsel, which already compares the
+-- two sides' distinct counts; the composite-key correction must not override it.
+CREATE TABLE join_est_uq (a int UNIQUE);
+INSERT INTO join_est_uq SELECT i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_many (a int);
+INSERT INTO join_est_many SELECT i % 1000 + 1 FROM generate_series(1, 10000) i;
+ANALYZE join_est_uq;
+ANALYZE join_est_many;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_many m JOIN join_est_uq u ON m.a = u.a
+$$);
+DROP TABLE join_est_uq, join_est_many;
+
+-- Guard: a composite key bounds the join only when every key column is equated.
+-- Here only "a" is, and the pair's uniqueness says nothing about how many rows
+-- share an "a", so the estimate must come from the column's own distinct count.
+CREATE TABLE join_est_part (a int, b int);
+CREATE UNIQUE INDEX join_est_part_idx ON join_est_part (a, b);
+INSERT INTO join_est_part SELECT i % 100, i / 100 FROM generate_series(0, 999) i;
+CREATE TABLE join_est_pa (a int);
+INSERT INTO join_est_pa SELECT i FROM generate_series(0, 99) i;
+ANALYZE join_est_part;
+ANALYZE join_est_pa;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_pa x JOIN join_est_part y ON x.a = y.a
+$$);
+DROP TABLE join_est_part, join_est_pa;
+
+-- Only a unique index over exactly the joined columns bounds the join.  An
+-- expression index says nothing about the columns themselves, and a plain index
+-- does not say the combinations are unique.
+CREATE TABLE join_est_expr (a int, b int);
+CREATE UNIQUE INDEX join_est_expr_idx ON join_est_expr (a, abs(b));
+INSERT INTO join_est_expr SELECT i, i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_expr_ref (a int, b int);
+INSERT INTO join_est_expr_ref SELECT i, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_expr;
+ANALYZE join_est_expr_ref;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_expr e JOIN join_est_expr_ref r
+        ON e.a = r.a AND e.b = r.b
+$$);
+DROP TABLE join_est_expr, join_est_expr_ref;
+
+CREATE TABLE join_est_plain (a int, b int);
+CREATE INDEX join_est_plain_idx ON join_est_plain (a, b);
+INSERT INTO join_est_plain SELECT i, i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_plain_ref (a int, b int);
+INSERT INTO join_est_plain_ref SELECT i, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_plain;
+ANALYZE join_est_plain_ref;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_plain p JOIN join_est_plain_ref r
+        ON p.a = r.a AND p.b = r.b
+$$);
+DROP TABLE join_est_plain, join_est_plain_ref;
+
+-- A partial unique index bounds the join only when the query implies its
+-- predicate.
+CREATE TABLE join_est_pidx (a int, b int);
+CREATE UNIQUE INDEX join_est_pidx_idx ON join_est_pidx (a, b) WHERE a > 0;
+INSERT INTO join_est_pidx SELECT i, i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_pidx_ref (a int, b int);
+INSERT INTO join_est_pidx_ref SELECT i, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_pidx;
+ANALYZE join_est_pidx_ref;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_pidx p JOIN join_est_pidx_ref r
+        ON p.a = r.a AND p.b = r.b
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_pidx p JOIN join_est_pidx_ref r
+        ON p.a = r.a AND p.b = r.b
+    WHERE p.a > 0
+$$);
+DROP TABLE join_est_pidx, join_est_pidx_ref;
+
+-- A key of three columns is a key, and so is one whose index lists the columns
+-- in another order.
+CREATE TABLE join_est_3 (a int, b int, c int);
+CREATE UNIQUE INDEX join_est_3_idx ON join_est_3 (c, b, a);
+INSERT INTO join_est_3 SELECT i, i, i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_3_ref (a int, b int, c int);
+INSERT INTO join_est_3_ref SELECT i, i, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_3;
+ANALYZE join_est_3_ref;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_3 x JOIN join_est_3_ref r
+        ON x.a = r.a AND x.b = r.b AND x.c = r.c
+$$);
+DROP TABLE join_est_3, join_est_3_ref;
+
+-- An index over more columns than are equated does not make any of them unique.
+CREATE TABLE join_est_super (a int, b int, c int);
+CREATE UNIQUE INDEX join_est_super_idx ON join_est_super (a, b, c);
+INSERT INTO join_est_super SELECT i, i, i % 7 FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_super_ref (a int, b int);
+INSERT INTO join_est_super_ref SELECT i, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_super;
+ANALYZE join_est_super_ref;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_super s JOIN join_est_super_ref r
+        ON s.a = r.a AND s.b = r.b
+$$);
+DROP TABLE join_est_super, join_est_super_ref;
+
+-- The bound must also hold on the parameterized path, where the join is a nested
+-- loop that probes the key one row at a time.
+CREATE TABLE join_est_pk2 (a int, b int, PRIMARY KEY (a, b));
+INSERT INTO join_est_pk2 SELECT i, i FROM generate_series(1, 1000) i;
+CREATE TABLE join_est_o2 (a int, b int);
+INSERT INTO join_est_o2 SELECT i, i FROM generate_series(1, 1000) i;
+ANALYZE join_est_pk2;
+ANALYZE join_est_o2;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_o2 o JOIN join_est_pk2 p ON p.a = o.a AND p.b = o.b
+$$);
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+DROP TABLE join_est_pk2, join_est_o2;
+
+
+
+-- A grouped subquery emits one row per group, so its output is unique on the
+-- grouping columns and a join that equates all of them cannot exceed the other
+-- side's rows.  Without that, the per-column products collapse to a single row.
+CREATE TABLE join_est_grp (a int, b int, v int);
+INSERT INTO join_est_grp SELECT i, i, i FROM generate_series(1, 2000) i;
+CREATE TABLE join_est_grp_dim (a int, b int, PRIMARY KEY (a, b));
+INSERT INTO join_est_grp_dim SELECT i, i FROM generate_series(1, 2000) i;
+ANALYZE join_est_grp;
+ANALYZE join_est_grp_dim;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM (SELECT a, b, sum(v) FROM join_est_grp GROUP BY a, b) g
+        JOIN join_est_grp_dim d USING (a, b)
+$$);
+
+-- Equating only part of the key is not a key, and the estimate stays where the
+-- per-column counts put it.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM (SELECT a, b, sum(v) FROM join_est_grp GROUP BY a, b) g
+        JOIN join_est_grp_dim d ON g.a = d.a
+$$);
+DROP TABLE join_est_grp, join_est_grp_dim;
+
+
+-- A multi-column equijoin multiplies the per-column selectivities, which takes
+-- the join columns to be independent on both sides.  A statistics object that
+-- covers them on both relations gives the joint count instead.
+CREATE TABLE join_est_mv (a int, b int);
+INSERT INTO join_est_mv SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 20000) i;
+CREATE TABLE join_est_mv_ref (a int, b int);
+INSERT INTO join_est_mv_ref SELECT i % 1000, (i % 1000) / 10 FROM generate_series(1, 10000) i;
+ANALYZE join_est_mv;
+ANALYZE join_est_mv_ref;
+-- without statistics: the independence product, a hundred times low
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
+$$);
+
+CREATE STATISTICS join_est_mv_s (ndistinct) ON a, b FROM join_est_mv;
+CREATE STATISTICS join_est_mv_rs (ndistinct) ON a, b FROM join_est_mv_ref;
+ANALYZE join_est_mv;
+ANALYZE join_est_mv_ref;
+-- the joint distinct count reproduces the actual size
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_mv m JOIN join_est_mv_ref r ON m.a = r.a AND m.b = r.b
+$$);
+DROP TABLE join_est_mv, join_est_mv_ref;
+
+
+-- A comparison between two columns of one relation is not a constant, but both
+-- distributions are known: the estimate is the average of P(a < v) over b,
+-- the same expectation the inequality join estimate uses across relations.
+CREATE TABLE join_est_vv (a int, b int);
+INSERT INTO join_est_vv SELECT i % 1000, 100000 + (i % 1000) FROM generate_series(1, 20000) i;
+ANALYZE join_est_vv;
+-- disjoint ranges: every pair matches, and the reverse never does
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_vv WHERE a < b
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_vv WHERE a > b
+$$);
+DROP TABLE join_est_vv;
+
+-- A join column that is restricted by a comparison on itself sees only part of
+-- its distribution, so the join is estimated from the conditional distribution
+-- rather than from the whole column.  It matters when the restriction excludes a
+-- most common value: here a third of each table holds k = 0, and the join on the
+-- other values must not be multiplied by that value's frequency.
+CREATE TABLE join_est_res (k int, payload text);
+INSERT INTO join_est_res SELECT CASE WHEN g <= 1000 THEN 0 ELSE g - 1000 END,
+                            CASE WHEN g % 2 = 0 THEN 'x' ELSE 'z' END
+                     FROM generate_series(1, 3000) g;
+CREATE TABLE join_est_res2 (k int, payload text);
+INSERT INTO join_est_res2 SELECT * FROM join_est_res;
+ANALYZE join_est_res;
+ANALYZE join_est_res2;
+
+-- The values that fail the restriction are dropped and the rest are rescaled.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k > 0
+$$);
+
+-- A restriction that keeps every value changes nothing; one that keeps only the
+-- most common value rescales it to the whole column.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k >= 0
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k <= 0
+$$);
+
+-- Every strict comparison works, not only the inequalities.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k = 5
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k <> 0
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k BETWEEN 100 AND 200
+$$);
+
+-- The column may be the right operand, the restriction may come as a list, and
+-- the constant may have another type; none of that changes the comparison.  A
+-- NULL in the list excludes nothing, and "NOT IN" is an ALL clause, which is not
+-- a restriction of this form.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE 0 < a.k
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k IN (1, 2, 3)
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k IN (1, 2, NULL)
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k NOT IN (1, 2)
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.k > 0::bigint
+$$);
+
+-- A collatable key works through LIKE and through a comparison that needs the
+-- clause's collation.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.payload = b.payload
+    WHERE a.payload < 'y'
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.payload = b.payload
+    WHERE a.payload LIKE 'x%'
+$$);
+
+-- A restriction on another column says nothing about which key values survive,
+-- so it leaves the join estimate alone.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE a.payload = 'x'
+$$);
+
+-- The restriction may be written on either side of the join, and the estimates
+-- of a self-join, a semi-join and a three-way join take the same path.
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+    WHERE b.k > 0
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res b ON a.k = b.k
+    WHERE a.k > 0
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a JOIN join_est_res2 b ON a.k = b.k
+         JOIN join_est_res2 c ON a.k = c.k
+    WHERE a.k > 0
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_res a
+    WHERE a.k > 0 AND a.k IN (SELECT k FROM join_est_res2)
+$$);
+
+-- A nullable key: a strict restriction removes the nulls, and IS NOT NULL is one
+-- of them, so the surviving rows are no longer charged that fraction.
+CREATE TABLE join_est_resn (k int);
+INSERT INTO join_est_resn SELECT CASE WHEN g % 2 = 0 THEN NULL ELSE 1 + g % 100 END
+                        FROM generate_series(1, 2000) g;
+ANALYZE join_est_resn;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_resn a JOIN join_est_resn b ON a.k = b.k
+    WHERE a.k > 50
+$$);
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_resn a JOIN join_est_resn b ON a.k = b.k
+    WHERE a.k IS NOT NULL
+$$);
+DROP TABLE join_est_res, join_est_res2, join_est_resn;
+
+-- A set operation without ALL deduplicates, so its whole output row is a key:
+-- a join that equates every output column can match at most one row per input.
+-- Here a and b are dependent (b = a), so treating the two clauses as
+-- independent collapses the estimate to 1 while every row really matches.
+CREATE TABLE join_est_setop_a (a int, b int);
+CREATE TABLE join_est_setop_b (a int, b int);
+CREATE TABLE join_est_setop_probe (a int, b int);
+INSERT INTO join_est_setop_a SELECT g, g FROM generate_series(1, 100) g;
+INSERT INTO join_est_setop_b SELECT g, g FROM generate_series(1, 100) g;
+INSERT INTO join_est_setop_probe SELECT g, g FROM generate_series(1, 100) g;
+ANALYZE join_est_setop_a, join_est_setop_b, join_est_setop_probe;
+SELECT * FROM check_join_est_rows($$
+    SELECT * FROM join_est_setop_probe p
+      JOIN (SELECT a, b FROM join_est_setop_a
+            INTERSECT
+            SELECT a, b FROM join_est_setop_b) s
+        ON p.a = s.a AND p.b = s.b
+$$);
+DROP TABLE join_est_setop_a, join_est_setop_b, join_est_setop_probe;
+
+DROP FUNCTION check_join_est_rows(text);

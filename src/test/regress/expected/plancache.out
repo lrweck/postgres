@@ -298,11 +298,11 @@ select name, generic_plans, custom_plans from pg_prepared_statements
 -- up to 5 executions, custom plan is used
 set plan_cache_mode to auto;
 explain (costs off) execute test_mode_pp(2);
-                        QUERY PLAN                        
-----------------------------------------------------------
+         QUERY PLAN          
+-----------------------------
  Aggregate
-   ->  Index Only Scan using test_mode_a_idx on test_mode
-         Index Cond: (a = 2)
+   ->  Seq Scan on test_mode
+         Filter: (a = 2)
 (3 rows)
 
 select name, generic_plans, custom_plans from pg_prepared_statements
@@ -387,11 +387,11 @@ explain (costs off) execute test_mode_pp(2);
 -- but we can force a custom plan
 set plan_cache_mode to force_custom_plan;
 explain (costs off) execute test_mode_pp(2);
-                        QUERY PLAN                        
-----------------------------------------------------------
+         QUERY PLAN          
+-----------------------------
  Aggregate
-   ->  Index Only Scan using test_mode_a_idx on test_mode
-         Index Cond: (a = 2)
+   ->  Seq Scan on test_mode
+         Filter: (a = 2)
 (3 rows)
 
 select name, generic_plans, custom_plans from pg_prepared_statements

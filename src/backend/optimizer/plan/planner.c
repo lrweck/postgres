@@ -1963,6 +1963,57 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		current_rel = query_planner(root, standard_qp_callback, &qp_extra);
 
 		/*
+		 * Plan race: make the upper stages build on the Nth candidate of the
+		 * top join rel instead of the cheapest one.  Every alternative the
+		 * join search kept then goes through the normal pipeline, so each one
+		 * is a complete, executable plan and a harness can measure them one by
+		 * one (bench/plan_race.py).
+		 */
+		if (plan_race_pick >= 0)
+		{
+			RelOptInfo *top = NULL;
+			ListCell   *lpr;
+
+			foreach(lpr, root->join_rel_list)
+			{
+				RelOptInfo *rel = (RelOptInfo *) lfirst(lpr);
+
+				if (rel->reloptkind != RELOPT_JOINREL)
+					continue;
+				if (top == NULL ||
+					bms_num_members(rel->relids) > bms_num_members(top->relids))
+					top = rel;
+			}
+
+			if (top != NULL)
+			{
+				/*
+				 * Candidates are the paths the join search kept.  Paths it
+				 * pruned cannot be injected here: keeping them alive needs a
+				 * collection context that survives add_path(), and using them
+				 * as the top path is unsafe (they may not produce the rel's
+				 * output).
+				 */
+				List	   *cands = top->pathlist;
+
+				ereport(NOTICE,
+						(errmsg("plan_race: %d candidates at top join rel",
+								list_length(cands))));
+
+				if (plan_race_pick < list_length(cands))
+				{
+					Path	   *picked = (Path *) list_nth(cands,
+														  plan_race_pick);
+
+					top->cheapest_total_path = picked;
+					elog(LOG, "plan_race: candidate %d of %d (ptype %d, cost %.0f)",
+						 plan_race_pick, list_length(cands),
+						 (int) picked->pathtype, picked->total_cost);
+				}
+			}
+		}
+
+		/*
 		 * Convert the query's result tlist into PathTarget format.
 		 *
 		 * Note: this cannot be done before query_planner() has performed
