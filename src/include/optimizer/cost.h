@@ -148,6 +148,13 @@ extern PGDLLIMPORT bool enable_material;
 extern PGDLLIMPORT bool enable_memoize;
 extern PGDLLIMPORT bool enable_mergejoin;
 extern PGDLLIMPORT bool enable_hashjoin;
+
+/*
+ * Plan race: force the planner to use the Nth candidate path of the top join
+ * relation, so a harness can execute alternatives one at a time.  -1 keeps
+ * normal behaviour.  See bench/plan_race.py.
+ */
+extern PGDLLIMPORT int plan_race_pick;
 extern PGDLLIMPORT bool enable_gathermerge;
 extern PGDLLIMPORT bool enable_partitionwise_join;
 extern PGDLLIMPORT bool enable_partitionwise_aggregate;

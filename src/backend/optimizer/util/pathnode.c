@@ -237,6 +237,8 @@ compare_path_costs_fuzzily(Path *path1, Path *path2, double fuzz_factor)
 #undef CONSIDER_PATH_STARTUP_COST
 }
 
+int			plan_race_pick = -1;
+
 /*
  * set_cheapest
  *	  Find the minimum-cost paths from among a relation's paths,
