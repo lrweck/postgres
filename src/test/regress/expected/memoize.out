@@ -140,8 +140,8 @@ SELECT explain_memoize('
 SELECT COUNT(*), AVG(t1.twenty) FROM tenk1 t1 LEFT JOIN
 LATERAL (SELECT t1.two+1 AS c1, t2.unique1 AS c2 FROM tenk1 t2) s ON TRUE
 WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
-                                   explain_memoize                                    
---------------------------------------------------------------------------------------
+                                       explain_memoize                                        
+----------------------------------------------------------------------------------------------
  Aggregate (actual rows=1.00 loops=N)
    ->  Nested Loop (actual rows=1000.00 loops=N)
          ->  Seq Scan on tenk1 t1 (actual rows=1000.00 loops=N)
@@ -151,10 +151,12 @@ WHERE s.c1 = s.c2 AND t1.unique1 < 1000;', false);
                Cache Key: (t1.two + 1)
                Cache Mode: binary
                Hits: 998  Misses: 2  Evictions: Zero  Overflows: 0  Memory Usage: NkB
-               ->  Seq Scan on tenk1 t2 (actual rows=1.00 loops=N)
+               ->  Index Only Scan using tenk1_unique1 on tenk1 t2 (actual rows=1.00 loops=N)
                      Filter: ((t1.two + 1) = unique1)
                      Rows Removed by Filter: 9999
-(12 rows)
+                     Heap Fetches: N
+                     Index Searches: N
+(14 rows)
 
 -- And check we get the expected results.
 SELECT COUNT(*), AVG(t1.twenty) FROM tenk1 t1 LEFT JOIN

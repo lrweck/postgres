@@ -653,6 +653,18 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	/* estimate number of main-table tuples fetched */
 	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
 
+	/*
+	 * A parameterized path is probed once per outer row, and ppi_rows already
+	 * accounts for every clause that will be applied; the index selectivity
+	 * alone ignores what the parameter carries and overstates the tuples read
+	 * per probe.  Measured on TPC-H q9, a probe of lineitem reads 7 rows while
+	 * the index selectivity gives 31, and the extra random heap pages charged
+	 * per probe (one per tuple) made the planner prefer a bitmap scan that
+	 * does more work per probe.
+	 */
+	if (path->path.param_info != NULL && path->path.rows < tuples_fetched)
+		tuples_fetched = path->path.rows;
+
 	/* fetch estimated page costs for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
 							  &spc_random_page_cost,
